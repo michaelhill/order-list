@@ -158,6 +158,27 @@ export default defineTask({
     }
 
     await index.updateSettings({
+      // "sort" ahead of the relevance rules, which is not where Meilisearch
+      // puts it by default -- the default order is words, typo, proximity,
+      // attribute, sort, exactness, so an explicit sort only ever breaks ties
+      // between documents relevance had already tied. That made
+      // `sort=price-asc` look broken in exactly the way a user would notice:
+      // searching "led" and asking for cheapest first returned $24.99, $29.99,
+      // $2.49, because those sat in three different relevance buckets and each
+      // bucket was sorted on its own. Storing prices as numbers was necessary
+      // for the sort to mean anything at all, but not sufficient for it to
+      // apply. With sort first, a request that names one gets it applied
+      // across the whole result set, and a request that does not is unaffected
+      // -- the rule is a no-op without a sort parameter, so plain relevance
+      // ranking is unchanged.
+      rankingRules: [
+        "sort",
+        "words",
+        "typo",
+        "proximity",
+        "attribute",
+        "exactness"
+      ],
       searchableAttributes: ["title", "description", "vendorName", "skus"],
       filterableAttributes: [
         "vendorId",
