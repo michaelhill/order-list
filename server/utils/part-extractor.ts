@@ -79,6 +79,9 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   { match: 'reduxrobotics.com', name: 'Redux Robotics' },
   { match: 'limelightvision.io', name: 'Limelight Vision' },
   { match: 'copperforge.cc', name: 'Copperforge' },
+  { match: 'lumynlabs.com', name: 'Lumyn Labs' },
+  // The apex domain, TLD and all -- not a subdomain of a luma.com.
+  { match: 'luma.vision', name: 'Luma Vision' },
   { match: 'andymark.com', name: 'AndyMark' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
   { match: 'vexpro.com', name: 'VEXpro' },
