@@ -38,9 +38,22 @@ everything else listens on localhost:
 | Nuxt | `127.0.0.1:3000` — `.output/server/index.mjs` under PM2 |
 | vendord | `127.0.0.1:3434` — the scraper, under PM2 |
 | Postgres | `127.0.0.1:5433` — `docker compose up -d`, container `parts-db-1` |
+| Meilisearch | `127.0.0.1:7700` — same compose file, container `parts-meilisearch-1`, capped at 512 MB |
 
 `deploy/provision.sh` builds the box from scratch and is safe to re-run. The
 app runs as the unprivileged `parts` user out of `/srv/parts`, not as root.
+
+**Search brings its own setup up.** `provision.sh` never ran `docker compose up`
+— Postgres was started by hand once — so the deploy workflow now does it, which
+is what makes the Meilisearch service in `docker-compose.yml` exist on the box
+at all. The same step appends `MEILISEARCH_HOST`/`INDEX` to the droplet's
+`.env` and generates `MEILISEARCH_API_KEY` if it is absent (rsync excludes
+`.env`, so it cannot be shipped), then waits for `/health`. It runs before the
+migrate that seeds vendors and before the reload that re-reads `.env`. The key
+is written once and never rotated on later deploys: rotating it would lock the
+running app out of its own index until the next reload. A final step scrapes
+**only when the index is empty**, so the first deploy populates and later ones
+stay fast; vendord's nightly task keeps it fresh after that.
 
 **Releases ship themselves.** `.github/workflows/deploy.yml` runs on every push
 to `main` (and on `workflow_dispatch`): it builds both outputs in CI, checks
@@ -124,7 +137,8 @@ Dev config lives in `.env` (gitignored). Most server code reads `process.env.*` 
 - `VENDORD_URL` — optional; where the scraper listens. Defaults to `http://localhost:3001` in dev and `http://localhost:3434` in production
 - `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` (`http://localhost:3000` in dev)
 - `RESEND_KEY` — transactional email; optional in dev (only used when sending invites/notifications)
-- `MEILISEARCH_HOST`, `MEILISEARCH_API_KEY`, `MEILISEARCH_INDEX` — product search; optional
+- `MEILISEARCH_HOST`, `MEILISEARCH_API_KEY`, `MEILISEARCH_INDEX` — product search; optional. `docker compose up -d` runs one locally on `127.0.0.1:7700`, so dev is `http://127.0.0.1:7700` with the key from `MEILISEARCH_API_KEY` (default `devsearchkey`)
+- `MEILISEARCH_EMBEDDER` — optional; the name of an embedder configured on the index. Set it to turn on hybrid (keyword + semantic) search, leave it unset for keyword only
 - `DIGIKEY_CLIENT_ID`, `DIGIKEY_CLIENT_SECRET`, `DIGIKEY_API_BASE` — DigiKey Product Information API v4 (developer.digikey.com); optional. Sandbox and production are separate apps with separate credentials, so `DIGIKEY_API_BASE` has to match the pair in use — `https://sandbox-api.digikey.com` or `https://api.digikey.com`. Unset means DigiKey parts fall back to the URL-derived name and SKU.
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — optional; enables "Continue with Google" on the auth pages. Both must be set or the provider is absent entirely and no button renders. The redirect URI to register with Google is `<origin>/api/auth/callback/google`. Signing in with Google does **not** bypass the invitation gate — Better Auth creates an OAuth user through the same `createWithHooks("user")` path, so the hook in `auth.ts` runs either way.
 - `SIGNUP_BOOTSTRAP_EMAIL` — optional; restricts the one-time first-account signup to a single address (see *Signups are invitation-only* below). Unset means the first person to reach an empty instance claims it.
@@ -184,7 +198,38 @@ Every route calls `assertOrderInOrg()` first — a receipt id alone must never b
 **API routes** — Nitro file-based routing under `server/api/` with method suffixes (`index.get.ts`, `[id].patch.ts`, etc.). Orders live at `/api/orders` (list/create), `/api/orders/[id]` (patch status/vendor, delete), `/api/orders/[id]/details`, `/api/orders/[id]/items[/itemId]`, `/api/orders/[id]/receipts[/receiptId]`, `/api/orders/[id]/cart-link`, plus `bulk`, `move`, `split`, and `payment-methods`.
 
 **Vendors & product search** — three distinct systems:
-- `server/api/vendors/search.get.ts` queries **Meilisearch** with hybrid (keyword + semantic) search over the product catalog; `facets.get.ts` beside it returns facet values (default `vendorName`) for the search page's filters.
+- `server/api/vendors/search.get.ts` queries **Meilisearch** over the product catalog; `facets.get.ts` beside it returns facet values (default `vendorName`) for the search page's filters. Neither is auth-gated.
+
+  **How the index gets filled.** Two Nitro tasks in vendord, chained: `scrape` walks every row of the `vendors` table — Shopify through `/products.json?limit=250&page=N`, BigCommerce through its storefront GraphQL — and upserts each product into `productCache`; it then runs `meilisearch:sync`, which joins `productCache` to `vendors` and pushes documents to the index. Trigger them at `GET /scrape` and `GET /sync` on vendord (dev: `localhost:3001`), and `scrape` is also on a nightly cron in `vendord/nitro.config.ts`. Both read `DATABASE_URL` and the `MEILISEARCH_*` vars, and vendord needs its own `bun install`.
+
+  **The `vendors` table is the input, and it does not seed itself** — an empty table means an empty index, with both tasks reporting success. Twelve FRC vendors are reachable, and which platform a brand runs is not guessable. Several of the smaller ones sit on a `shop.`/`store.` subdomain rather than the apex, and the apex does not always redirect to it, so the hostname in the table is the one that actually serves `/products.json`:
+
+  | vendor | `type` | hostname |
+  | --- | --- | --- |
+  | WestCoast Products | `shopify` | `wcproducts.com` |
+  | AndyMark | `shopify` | `www.andymark.com` |
+  | The Thrifty Bot | `shopify` | `www.thethriftybot.com` |
+  | Cross the Road Electronics | `shopify` | `store.ctr-electronics.com` |
+  | REV Robotics | `bigcommerce` | `www.revrobotics.com` |
+  | Swyft Robotics | `swyft` | `swyftrobotics.com` |
+  | Swerve Drive Specialties | `shopify` | `www.swervedrivespecialties.com` |
+  | Armabot | `shopify` | `www.armabot.com` |
+  | Last Anvil Innovations | `shopify` | `lastanvil.com` |
+  | Limelight Vision | `shopify` | `limelightvision.io` |
+  | Redux Robotics | `shopify` | `shop.reduxrobotics.com` |
+  | Copperforge | `shopify` | `shop.copperforge.cc` |
+
+  **`swyft` is a one-store type, not a platform.** Swyft runs a *headless* Shopify storefront on Next.js, so none of the endpoints the `shopify` branch needs are served: `/products.json` and `/collections/all/products.json` both 404, and the sitemap is the Next.js app's own, with no `/products/{handle}` URLs in it. Only the CDN and checkout are still Shopify's. What the Next.js app does publish is better than either — every page embeds an RSC flight payload (`self.__next_f`) carrying complete product objects (`slug`, `sku`, `name`, `description`, `priceCents`, `image`, `shopifyProductId`, `shopifyVariantId`, `variants[]`), and each page carries not only its own product but every one it links to, so walking the sitemap's ~64 product pages yields the whole catalogue several times over, deduplicated by slug. `vendord/server/utils/swyft.ts` does this.
+
+  Three things there are deliberate. The payload is a React element tree rather than a document with a known path to the product, so objects are located by a key only they carry (`"variants":[`) and read out by **brace matching**. React marks lazy chunk references and absent values with a leading `$` (`"$undefined"`, `"$3a"`), so any field read from it has to reject those or it stores a pointer as text. And the indexed price is the product's own `priceCents`, **not** `min(variants)`: they diverge where the cheap variants are spare parts — the bumper kit lists at $999.99 with a $19.99 screws-only variant under it, and $999.99 is what the page shows.
+
+  Cart handoff is not wired up for it: `detectPlatform` returns `null` for a `swyft` vendorType, so no button appears. The scraped variants do carry `shopifyVariantId`, so Shopify cart permalinks could be made to work later.
+
+  Three others are BigCommerce but **cannot** be scraped, and it is worth not re-deriving this: `getBigCommerceToken` lifts a storefront GraphQL token out of the homepage HTML, and **goBILDA, ServoCity and BaneBots don't publish one** — not on any template (home, cart, login, search), not at runtime (their storefronts are server-rendered Stencil and never call the GraphQL API), and their `/graphql` answers *"credentials were missing"* to an anonymous request. Reaching them would need a different scraper built on their product sitemap (`/xmlsitemap.php?type=products`) plus a page fetch each. Playing With Fusion, Robot Marketplace and Team221 run older platforms with no product feed at all, and Kauai Labs and Nexus Robot are WooCommerce with the public Store API (`/wp-json/wc/store/v1/products`) disabled — checked, all 404.
+
+  **Hybrid search is opt-in.** `search.get.ts` used to pass `hybrid: { embedder: "default" }` unconditionally, and Meilisearch rejects the whole request when no embedder is configured — *"Passing `hybrid` as a parameter requires enabling the `vector store` experimental feature"* — so every search failed on any instance without one, which is the default. It now sends `hybrid` only when `MEILISEARCH_EMBEDDER` names one, and otherwise runs keyword search over `title`/`description`/`vendorName`/`skus`.
+
+  Two things the sync deliberately normalises, because Shopify's raw values break the features the index advertises: **prices are parsed to numbers** (Shopify quotes them as strings, and `price` is a declared sortable attribute — sorting strings put `119.99` between `11.00` and `12.00`, so `sort=price-asc` silently returned nonsense), and **`body_html` is flattened to text** (it is both indexed and rendered by the search page).
 - `server/api/vendors/index.get.ts` proxies to the external `vendord` scraper service over localhost — `http://localhost:3434` in production, `http://localhost:3001` in dev, both overridden by `VENDORD_URL` (`server/utils/vendord.ts`). It forwards only what the scraper needs to look like a browser, never the caller's cookies. Vendors carry a `type` (`shopify`/`bigcommerce`/`amazon`) and `config`; fetched products are cached in the `productCache` table.
 - `server/api/vendors/extract.get.ts` + `server/utils/part-extractor.ts` is a **self-contained in-process extractor** that needs no scraper service or DB: given a product URL it tries Shopify's `/products/{handle}.json`, then JSON-LD, then an Amazon-specific DOM read (their meta tags describe the storefront — `<meta name="title">` is `"Amazon.com: {name} : {category}"` and there's no price tag at all), then OpenGraph/meta. It is auth-gated and refuses loopback/private/link-local hosts so it can't be used as an SSRF proxy.
 
