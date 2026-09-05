@@ -193,13 +193,19 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "pm2 list; pm2 logs --nostream --lines 40" || true
           exit 1
 
-      # Only when the index is empty, which in practice means the first deploy
-      # after search shipped. A scrape walks twelve storefronts and takes
-      # minutes, so doing it every push would slow every deploy and hammer
-      # vendors for no reason; vendord's nightly task keeps it fresh after
-      # this. Never fails the deploy -- the site is already up and verified,
-      # and a stale index is not worth rolling back for.
-      - name: Populate search index if empty
+      # Runs when there is something new to fetch: an empty index (the first
+      # deploy after search shipped) or any vendor row with nothing cached
+      # against it. That second case is the one that matters in practice -- a
+      # migration that seeds a new vendor lands its row, and checking only
+      # whether the index was empty meant those products did not appear until
+      # the nightly task ran. Lumyn Labs and Luma Vision shipped that way and
+      # were missing from production search until scraped by hand.
+      #
+      # Not on every push: a scrape walks every storefront and takes minutes,
+      # so it would slow each deploy and hammer vendors for nothing. Never
+      # fails the deploy either -- the site is already up and verified by this
+      # point, and a stale index is not worth rolling back for.
+      - name: Populate search index if needed
         continue-on-error: true
         run: |
           ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "cd $APP_DIR && bash -s" <<'REMOTE'
@@ -208,11 +214,17 @@ jobs:
           stats=$(curl -fsS -m 10 -H "Authorization: Bearer $key" \
             http://127.0.0.1:7700/indexes/products/stats 2>/dev/null || echo '')
           count=$(printf '%s' "$stats" | sed -n 's/.*"numberOfDocuments":\([0-9]*\).*/\1/p')
-          if [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null; then
-            echo "index already holds $count documents; skipping scrape"
+          # Vendors the scrape has never cached anything for -- a newly seeded
+          # row looks exactly like this until it is fetched.
+          unscraped=$(docker exec parts-db-1 psql -U postgres -t -A -c \
+            "select count(*) from vendors v where not exists (select 1 from product_cache p where p.vendor_id = v.id)" \
+            2>/dev/null || echo '')
+          if [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null \
+             && [ "${unscraped:-1}" = "0" ]; then
+            echo "index holds $count documents and every vendor is cached; skipping scrape"
             exit 0
           fi
-          echo "index empty -- running the initial scrape (this takes a few minutes)"
+          echo "scraping: index holds ${count:-0} documents, ${unscraped:-unknown} vendor(s) uncached (takes a few minutes)"
           curl -fsS -m 1800 http://127.0.0.1:3434/scrape || {
             echo "scrape failed; run 'curl localhost:3434/scrape' on the droplet" >&2
             exit 1
