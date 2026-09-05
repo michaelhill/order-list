@@ -51,9 +51,15 @@ at all. The same step appends `MEILISEARCH_HOST`/`INDEX` to the droplet's
 `.env`, so it cannot be shipped), then waits for `/health`. It runs before the
 migrate that seeds vendors and before the reload that re-reads `.env`. The key
 is written once and never rotated on later deploys: rotating it would lock the
-running app out of its own index until the next reload. A final step scrapes
-**only when the index is empty**, so the first deploy populates and later ones
-stay fast; vendord's nightly task keeps it fresh after that.
+running app out of its own index until the next reload. A final step scrapes when
+there is something new to fetch — an empty index, **or any vendor row with
+nothing cached against it**. That second condition is the one that matters day
+to day: a migration seeding a new vendor lands its row, and an empty-index-only
+check left those products missing from production until the nightly task ran,
+which is exactly how Lumyn Labs and Luma Vision shipped invisible. It is
+deliberately not every push — a scrape walks every storefront and takes
+minutes — and it can never fail the deploy, the site being up and verified by
+then.
 
 **Releases ship themselves.** `.github/workflows/deploy.yml` runs on every push
 to `main` (and on `workflow_dispatch`): it builds both outputs in CI, checks
