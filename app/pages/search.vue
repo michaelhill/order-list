@@ -119,6 +119,15 @@ function clearFilters() {
 function getAddToOrderUrl(originalUrl: string) {
   return `/app?add=${encodeURIComponent(originalUrl)}`;
 }
+
+// One modal for the page, not one per card — a result set is up to 100 items.
+const historyProduct = ref<{ id: string; title: string } | null>(null);
+const historyOpen = ref(false);
+
+function openPriceHistory(item: SearchResultItem) {
+  historyProduct.value = { id: item.id, title: item.title };
+  historyOpen.value = true;
+}
 </script>
 
 <template>
@@ -274,12 +283,18 @@ function getAddToOrderUrl(originalUrl: string) {
             </p>
             <div class="mt-auto flex items-center justify-between gap-2">
               <div>
-                <p
+                <UButton
                   v-if="formatPrice(item.price, item.currency)"
-                  class="font-semibold text-primary"
+                  variant="ghost"
+                  color="primary"
+                  size="sm"
+                  class="font-semibold px-0 -ml-0.5 gap-1"
+                  trailing-icon="i-lucide-chart-line"
+                  title="Price history"
+                  @click="openPriceHistory(item)"
                 >
                   {{ formatPrice(item.price, item.currency) }}
-                </p>
+                </UButton>
               </div>
               <div class="flex gap-1">
                 <UButton
@@ -338,12 +353,18 @@ function getAddToOrderUrl(originalUrl: string) {
                 </p>
               </div>
               <div class="flex items-center gap-2 shrink-0">
-                <p
+                <UButton
                   v-if="formatPrice(item.price, item.currency)"
-                  class="font-semibold text-primary whitespace-nowrap"
+                  variant="ghost"
+                  color="primary"
+                  size="sm"
+                  class="font-semibold whitespace-nowrap gap-1"
+                  trailing-icon="i-lucide-chart-line"
+                  title="Price history"
+                  @click="openPriceHistory(item)"
                 >
                   {{ formatPrice(item.price, item.currency) }}
-                </p>
+                </UButton>
                 <UButton
                   v-if="item.originalUrl"
                   :to="getAddToOrderUrl(item.originalUrl)"
@@ -373,6 +394,12 @@ function getAddToOrderUrl(originalUrl: string) {
           </div>
         </UPageCard>
       </div>
+
+      <PriceHistoryModal
+        v-model:open="historyOpen"
+        :product-id="historyProduct?.id ?? null"
+        :title="historyProduct?.title ?? 'Price history'"
+      />
     </UContainer>
   </div>
 </template>

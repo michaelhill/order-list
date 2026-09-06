@@ -255,6 +255,51 @@ export const productCacheRelations = relations(productCache, ({ one }) => ({
   })
 }))
 
+// One row per *observed price*, not per observation. A catalogue of several
+// thousand products costs a few thousand rows and grows only when a vendor
+// actually moves a price, which is what keeps a daily scrape from turning into
+// millions of rows of "still $19.99".
+//
+// `lastSeenAt` is what makes change-only storage honest. Without it there is no
+// way to tell "held at $19.99 since March" from "we stopped scraping in March",
+// and a chart would draw a confident flat line across a gap in which anything
+// could have happened. It also gives the step plot its true shape: the old
+// price is known to have held right up to the scrape before the new one
+// appeared, so the change is a single vertical jump on a single day rather than
+// a slope drawn between two distant samples.
+export const productPriceHistory = pgTable(
+  'product_price_history',
+  {
+    id: text('id').primaryKey(),
+    productId: text('product_id')
+      .notNull()
+      .references(() => productCache.id, { onDelete: 'cascade' }),
+    // Micro-dollars, as orderItems.unitPriceMicros -- distributors quote
+    // sub-cent prices at quantity breaks and whole cents round them away.
+    priceMicros: bigint('price_micros', { mode: 'number' }).notNull(),
+    currency: text('currency').default('USD').notNull(),
+    // When this price was first seen, and the last scrape that still saw it.
+    recordedAt: timestamp('recorded_at').defaultNow().notNull(),
+    lastSeenAt: timestamp('last_seen_at').defaultNow().notNull()
+  },
+  table => [
+    index('product_price_history_product_idx').on(
+      table.productId,
+      table.recordedAt
+    )
+  ]
+)
+
+export const productPriceHistoryRelations = relations(
+  productPriceHistory,
+  ({ one }) => ({
+    product: one(productCache, {
+      fields: [productPriceHistory.productId],
+      references: [productCache.id]
+    })
+  })
+)
+
 export const notificationPreferences = pgTable(
   "notification_preferences",
   {
