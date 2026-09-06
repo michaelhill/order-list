@@ -107,6 +107,24 @@ jobs:
       - name: Install dependencies on the droplet
         run: ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "cd $APP_DIR && bun install"
 
+      # vendord launches Chromium for the handful of vendors whose storefront
+      # only answers a real browser. The download is idempotent and a no-op
+      # once the version matches, so this costs nothing on an ordinary deploy
+      # -- but it means a Playwright version bump installs its own browser
+      # rather than silently rendering nothing. Never fails the deploy: a
+      # missing browser degrades to the fetch that was there before.
+      - name: Ensure the render browser is installed
+        continue-on-error: true
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "cd $APP_DIR && bash -s" <<'REMOTE'
+          set -uo pipefail
+          if ! systemctl is-active --quiet xvfb.service; then
+            echo "xvfb.service is not running -- rendering will fall back to a plain fetch."
+            echo "Run deploy/provision.sh on the droplet to install it."
+          fi
+          npx --yes playwright@1.63.0 install chromium
+          REMOTE
+
       # Before the migrate that seeds vendors and the reload that reads .env.
       # Nothing else in this workflow runs `docker compose up`, so without
       # this step adding the service to docker-compose.yml would change

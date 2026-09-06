@@ -491,6 +491,71 @@ function collectProducts(
 // The markup is Salesforce B2C Commerce's default tiered-pricing template, so
 // this would likely hold for other stores on that platform -- but only Rock
 // West is confirmed, so only Rock West is asked.
+// Powerwerx's JSON-LD names the product and nothing else -- their Offer
+// carries a currency and an availability with no price in it, and there is no
+// sku anywhere in the markup. Both are in the page, in the two nopCommerce
+// blocks below, so read them from there rather than return a product priced
+// null for a page we went to the trouble of rendering.
+const POWERWERX_HOSTS = ['powerwerx.com']
+
+function isPowerwerxHost(hostname: string): boolean {
+  return POWERWERX_HOSTS.some(domain => hostMatches(hostname, domain))
+}
+
+function powerwerxFields(document: ParsedDoc): {
+  price: number | null
+  sku: string | null
+  variants: ExtractedVariant[]
+} {
+  // The first .product-price is the product's own; the rest belong to the
+  // variants below it. This has to *override* the JSON-LD rather than fill in
+  // behind it, because their AggregateOffer carries lowPrice 4.79 against
+  // highPrice 1089.19 over 62 offers -- a "from" price that reads like a real
+  // one, the same trap WCP's configurator pages set.
+  const price = parsePrice(
+    document.querySelector('.product-price')?.textContent ?? null
+  )
+  // "SKU: Wire-RB GTIN:" -- the label and the next field share the block.
+  const skuText = document.querySelector('.sku')?.textContent ?? ''
+  const sku = /SKU:\s*(\S+)/i.exec(skuText)?.[1] ?? null
+
+  // Each variant is a run of siblings: one `specAttr` per option (gauge,
+  // length), the sku, then the price. They are tied together by the product id
+  // in the sku element's own id -- `sku-2336` alongside `price-value-2336`.
+  const variants: ExtractedVariant[] = []
+  const seen = new Set<string>()
+  for (const el of document.querySelectorAll('div._sku[data-sku]')) {
+    const variantSku = el.getAttribute('data-sku')?.trim()
+    const productId = el.getAttribute('id')?.replace(/^sku-/, '')
+    const container = el.parentElement
+    if (!variantSku || !productId || !container) continue
+    if (seen.has(variantSku)) continue
+    seen.add(variantSku)
+
+    const options: string[] = []
+    for (const attr of container.querySelectorAll('.specAttr')) {
+      const value = attr.getAttribute('data-value')?.trim()
+      if (!value) continue
+      // The unit lives in the option's name rather than its value -- "Wire
+      // Gauge (AWG)" with value "2" -- so a bare join reads "2 / 25 ft." and
+      // loses what the 2 measures.
+      const unit = /\(([^)]+)\)\s*$/.exec(
+        attr.getAttribute('data-name') ?? ''
+      )?.[1]
+      options.push(unit && !value.includes(unit) ? `${value} ${unit}` : value)
+    }
+    const priceEl = container.querySelector(`.price-value-${productId}`)
+    variants.push({
+      id: variantSku,
+      sku: variantSku,
+      title: options.join(' / ') || variantSku,
+      price: parsePrice(priceEl?.getAttribute('data-price'))
+    })
+  }
+
+  return { price, sku, variants }
+}
+
 const AUTOMATION_DIRECT_HOSTS = ['automationdirect.com']
 
 function isAutomationDirectHost(hostname: string): boolean {
@@ -669,6 +734,11 @@ function brandName(brand: unknown): string | null {
 interface ParsedEl {
   getAttribute(name: string): string | null
   textContent: string | null
+  // Only the Powerwerx reader needs to walk the tree: their variants are a run
+  // of sibling elements sharing a container.
+  parentElement: ParsedEl | null
+  querySelector(selector: string): ParsedEl | null
+  querySelectorAll(selector: string): Iterable<ParsedEl>
 }
 interface ParsedDoc {
   querySelector(selector: string): ParsedEl | null
@@ -1313,7 +1383,13 @@ function tryAmazon(
 
 export async function extractPart(
   url: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  // HTML the caller already has. A few vendors answer this process with a bot
+  // challenge and a real browser with the page, so the route renders those
+  // through vendord and passes the result in here -- where it goes through
+  // exactly the same strategies as any other page. The browser buys access,
+  // not a parser, and a render that failed simply passes nothing.
+  prefetchedHtml?: string | null
 ): Promise<ExtractionResult> {
   const urlObj = new URL(url)
   const hostname = urlObj.hostname
@@ -1323,8 +1399,14 @@ export async function extractPart(
   // 0. Vendors whose pages a server can't read. Fetching them either fails or
   // returns a shell we'd misread as real details, so the URL is the only
   // source — and checking it costs no request.
+  //
+  // Skipped when the caller has already rendered the page: a real page beats a
+  // name guessed from a slug, so Studica is both URL-only *and* browser-
+  // rendered -- it uses the render when there is one and the URL when the
+  // browser could not produce one. The guess is still there at the end of this
+  // function for that case.
   const urlOnly = URL_ONLY_VENDORS.find(v => hostMatches(hostname, v.domain))
-  if (urlOnly) {
+  if (urlOnly && !prefetchedHtml) {
     const product = urlOnly.parse(urlObj)
     return {
       url,
@@ -1347,17 +1429,21 @@ export async function extractPart(
     }
   }
 
-  // Fetch the page once for the HTML-based strategies.
-  let html: string | null = null
-  try {
-    const res = await fetchWithUa(
-      url,
-      'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      signal
-    )
-    if (res.ok) html = await res.text()
-  } catch {
-    html = null
+  // Fetch the page once for the HTML-based strategies, unless the caller
+  // already rendered it. A failed render passes nothing and the ordinary
+  // fetch still runs, so the result is what it was before.
+  let html: string | null = prefetchedHtml ?? null
+  if (html === null) {
+    try {
+      const res = await fetchWithUa(
+        url,
+        'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        signal
+      )
+      if (res.ok) html = await res.text()
+    } catch {
+      html = null
+    }
   }
 
   if (html) {
@@ -1454,6 +1540,11 @@ export async function extractPart(
           : null)
         ?? name
 
+      // Read out of the page for vendors whose JSON-LD leaves them out.
+      const supplement = isPowerwerxHost(hostname)
+        ? powerwerxFields(document)
+        : null
+
       const imageNode = resolveRef(node.image, nodesById)
       const priceBreaks = isRockWestHost(hostname)
         ? rockWestPriceBreaks(html)
@@ -1470,9 +1561,9 @@ export async function extractPart(
         product: {
           title: displayTitle,
           description: cleanText(node.description) ?? ogDescription(),
-          price,
+          price: supplement?.price ?? price,
           currency: currency ?? 'USD',
-          sku: sku ?? null,
+          sku: sku ?? supplement?.sku ?? null,
           image: absoluteUrl(
             // schema.org allows a bare URL, an array, or an ImageObject.
             asString(
@@ -1487,7 +1578,7 @@ export async function extractPart(
           variantId: selected?.id || null,
           variantTitle:
             selected && selected.title !== name ? selected.title : null,
-          variants,
+          variants: supplement?.variants.length ? supplement.variants : variants,
           ...(priceBreaks.length > 0 ? { priceBreaks } : {})
         }
       }
@@ -1567,6 +1658,13 @@ export async function extractPart(
         }
       }
     }
+  }
+
+  // A rendered page that turned out to hold nothing readable still leaves the
+  // URL, for a vendor that has a parser for it.
+  const fromUrl = urlOnly?.parse(urlObj) ?? null
+  if (fromUrl) {
+    return { url, hostname, vendorName, source: 'url', product: fromUrl }
   }
 
   // Nothing usable — let the caller fall back to the external scraper.
