@@ -28,6 +28,11 @@ export interface ExtractedProduct {
   price: number | null
   currency: string | null
   sku: string | null
+  // The product's main image, absolute. Every page shape below carries one and
+  // it was being read and thrown away; the search index renders it, so a
+  // vendor whose scraper goes through this extractor (Volusion) had products
+  // with no picture at all.
+  image?: string | null
   // The platform's *product* id, distinct from the variant id below. Only the
   // Shopify path sets it, and only because WCP's configurator lookup is keyed
   // by product rather than variant.
@@ -82,6 +87,10 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   { match: 'lumynlabs.com', name: 'Lumyn Labs' },
   // The apex domain, TLD and all -- not a subdomain of a luma.com.
   { match: 'luma.vision', name: 'Luma Vision' },
+  // Without this the OpenGraph fallback names the vendor from og:site_name,
+  // which RoboPromo sets to the bare host -- parts came through as
+  // "www.robopromo.com". Their own itemprop legalName is "RoboPromo LLC".
+  { match: 'robopromo.com', name: 'RoboPromo' },
   { match: 'andymark.com', name: 'AndyMark' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
   { match: 'vexpro.com', name: 'VEXpro' },
@@ -191,6 +200,18 @@ async function fetchWithUa(
       'Accept-Language': 'en-US,en;q=0.9'
     }
   })
+}
+
+// Image URLs in markup are often protocol-relative ("//cdn/x.jpg") or
+// site-relative; the search page renders whatever it is handed, so resolve
+// against the page before storing it.
+function absoluteUrl(value: string | null, base: URL): string | null {
+  if (!value) return null
+  try {
+    return new URL(value, base).toString()
+  } catch {
+    return null
+  }
 }
 
 // ---- Shopify -------------------------------------------------------------
@@ -780,6 +801,15 @@ export async function extractPart(
           price,
           currency: currency ?? 'USD',
           sku: asString(node.sku) ?? asString(node.mpn),
+          image: absoluteUrl(
+            // schema.org allows a bare URL, an array, or an ImageObject.
+            asString(
+              Array.isArray(node.image) ? node.image[0] : node.image
+            ) ?? asString(
+              (node.image as Record<string, unknown> | undefined)?.url
+            ),
+            urlObj
+          ),
           // Neither fallback source exposes platform variant ids.
           variantId: null,
           variantTitle: null,
@@ -836,6 +866,14 @@ export async function extractPart(
             'meta[itemprop="sku"]',
             '[itemprop="sku"]'
           ]),
+          image: absoluteUrl(
+            getMeta(document, [
+              'meta[property="og:image"]',
+              'meta[name="twitter:image"]',
+              'meta[itemprop="image"]'
+            ]),
+            urlObj
+          ),
           // Neither fallback source exposes platform variant ids.
           variantId: null,
           variantTitle: null,

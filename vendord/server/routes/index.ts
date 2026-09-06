@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import parse from "../../../server/utils/set-cookie-parser";
 import { parseHTML } from "linkedom";
 import { createError, eventHandler, getHeaders, getQuery } from "h3";
-import { titleCase } from "scule";
+import { vendorDisplayName } from "../../../server/utils/part-extractor";
 import {
   bigCommerceToUnified,
   getBigCommerceToken,
@@ -196,9 +196,15 @@ export default eventHandler(async (event) => {
       product.variants = variants;
     }
 
+    // Dropping only the TLD leaves the www on, so www.robopromo.com became
+    // the vendor "www.robopromo" -- on the order line and, through the cache
+    // row written below, as a vendor_id with no vendors row behind it. Strip
+    // the subdomain first, and take the display name from the extractor's own
+    // table so a curated name ("RoboPromo") wins over a title-cased host.
+    const bareHost = urlObj.hostname.replace(/^www\./, "");
     const genericVendor = {
-      id: urlObj.hostname.split(".").slice(0, -1).join("."),
-      name: titleCase(urlObj.hostname.split(".").slice(0, -1).join(".")),
+      id: bareHost.split(".").slice(0, -1).join(".") || bareHost,
+      name: vendorDisplayName(urlObj.hostname),
       hostname: urlObj.hostname,
       type: "generic" as const,
     };
