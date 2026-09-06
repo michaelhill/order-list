@@ -34,15 +34,25 @@ export async function productsFromUrls(
       if (product.price != null) unified.price = product.price
       if (product.image) unified.image = product.image
 
-      // The page's own SKU when it publishes one, else whatever the caller can
-      // read off the URL -- Volusion puts the product code there and exposes
-      // it nowhere in the markup.
-      const sku = product.sku ?? options.skuFromUrl?.(url) ?? null
-      if (sku) {
-        // sync reads `sku || id` off this field for the searchable SKU list.
-        unified.variants = [
-          { id: sku, title: 'Default', price: product.price ?? undefined }
-        ]
+      // sync reads `sku || id` off each variant for the searchable SKU list,
+      // so carrying the real ones through is what makes a colour's own code
+      // (103131-BK) findable rather than only the base article's.
+      if (product.variants.length > 0) {
+        unified.variants = product.variants.map(variant => ({
+          id: variant.sku ?? variant.id,
+          title: variant.title,
+          price: variant.price ?? undefined
+        }))
+      } else {
+        // The page's own SKU when it publishes one, else whatever the caller
+        // can read off the URL -- Volusion puts the product code there and
+        // exposes it nowhere in the markup.
+        const sku = product.sku ?? options.skuFromUrl?.(url) ?? null
+        if (sku) {
+          unified.variants = [
+            { id: sku, title: 'Default', price: product.price ?? undefined }
+          ]
+        }
       }
 
       products.push(unified)

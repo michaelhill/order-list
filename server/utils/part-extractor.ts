@@ -1,5 +1,6 @@
 import { parseHTML } from 'linkedom'
 import type { DpoOptionGroup } from './wcp-dpo'
+import { fetchSailriteVariants, isSailriteHost } from './sailrite'
 
 // Self-contained product extractor: given a product URL, reach out to the site
 // and pull structured details. Tries, in order:
@@ -829,6 +830,12 @@ export async function extractPart(
         resolveRef(node.offers, nodesById)
       )
       const imageNode = resolveRef(node.image, nodesById)
+      // Sailrite prices per colour, length and width, and the page shows only
+      // the base article. See server/utils/sailrite.ts -- one page fetch per
+      // combination, run together, so the picker can carry real prices.
+      const jsonLdVariants = isSailriteHost(hostname)
+        ? await fetchSailriteVariants(urlObj, html, USER_AGENT, signal)
+        : []
       return {
         url,
         hostname,
@@ -856,7 +863,7 @@ export async function extractPart(
           // Neither fallback source exposes platform variant ids.
           variantId: null,
           variantTitle: null,
-          variants: []
+          variants: jsonLdVariants
         }
       }
     }
