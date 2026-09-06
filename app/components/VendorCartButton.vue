@@ -33,6 +33,46 @@ const listOpen = ref(false)
 // Which parts have been clicked, so a long order doesn't lose its place.
 const addedIds = ref(new Set<string>())
 
+// Vendors whose add endpoint answers with JSON rather than a page (Rock West's
+// Salesforce Commerce one does) would otherwise leave the buyer looking at a
+// wall of `{"action":"Cart-AddProduct"...}` in the handoff tab. Once the add
+// has landed, put the cart there instead.
+//
+// The add has to be a top-level navigation, so this cannot be tidied away into
+// a hidden iframe: the store's session cookie would then be third-party and
+// blocked, and the cart the buyer finally opened would be empty. And nothing
+// cross-origin reports when that navigation finished -- no load event reaches
+// this window -- so the follow-up is timed rather than triggered.
+//
+// The delay is therefore load-bearing, not cosmetic. Navigating too early
+// aborts the POST in flight and the part is silently missing from the cart:
+// measured, a 250ms follow-up loses the add outright, while 800ms does not.
+// The add itself loaded in 330-776ms over five runs, so 2s is roughly 2.5x the
+// slowest observed and 5x the median. A connection slow enough to beat that
+// still fails visibly rather than quietly -- the buyer lands on the cart page,
+// which lists exactly what is in it, with every row still clickable to retry.
+const CART_REVEAL_MS = 2000
+let revealTimer: ReturnType<typeof setTimeout> | undefined
+
+function revealCartAfterAdd() {
+  const cartUrl = plan.value?.cartUrl
+  if (!cartUrl) return
+  // Rescheduled on every row, so a buyer working down a list only waits out
+  // the delay once, after the last part they add.
+  clearTimeout(revealTimer)
+  revealTimer = setTimeout(() => {
+    // Re-targets the existing named window rather than opening another.
+    window.open(cartUrl, 'vendorcart')
+  }, CART_REVEAL_MS)
+}
+
+// Rows that submit a form need the reveal; plain links land on a real page
+// already, so they get the tick and nothing more.
+function onAddSubmit(id: string) {
+  addedIds.value.add(id)
+  revealCartAfterAdd()
+}
+
 // Shared between the link rows and the form rows, which have to look alike.
 const rowClass
   = 'flex w-full items-start gap-2 rounded-md p-1.5 text-sm '
@@ -97,6 +137,7 @@ async function openList() {
     }
     plan.value = result
     addedIds.value = new Set()
+    clearTimeout(revealTimer)
     listOpen.value = true
     reportShortfall(result)
   } finally {
@@ -174,7 +215,7 @@ async function openCart() {
               :action="link.url"
               method="post"
               target="vendorcart"
-              @submit="addedIds.add(link.id)"
+              @submit="onAddSubmit(link.id)"
             >
               <input
                 v-for="(value, name) in link.postFields"
