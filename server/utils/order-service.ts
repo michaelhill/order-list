@@ -91,7 +91,13 @@ export interface OrderRecord {
   organizationId: string;
   vendorId: string | null;
   vendorName: string | null;
-  vendorType: "shopify" | "bigcommerce" | "amazon" | "swyft" | null;
+  vendorType:
+    | "shopify"
+    | "bigcommerce"
+    | "amazon"
+    | "swyft"
+    | "volusion"
+    | null;
   // The vendor's storefront host, used to build a one-click cart link.
   vendorHostname: string | null;
   status: "to_order" | "ordered" | "arrived";

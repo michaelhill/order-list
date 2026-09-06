@@ -21,7 +21,7 @@ export const vendors = pgTable('vendors', {
   // 'shopify' scraper needs. See vendord/server/utils/swyft.ts.
   type: text('type')
     .notNull()
-    .$type<'shopify' | 'bigcommerce' | 'amazon' | 'swyft'>(),
+    .$type<'shopify' | 'bigcommerce' | 'amazon' | 'swyft' | 'volusion'>(),
   config: text('config').notNull(),
   hostname: text('hostname').notNull()
 })

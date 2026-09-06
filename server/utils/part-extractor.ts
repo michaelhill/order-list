@@ -82,6 +82,10 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   { match: 'lumynlabs.com', name: 'Lumyn Labs' },
   // The apex domain, TLD and all -- not a subdomain of a luma.com.
   { match: 'luma.vision', name: 'Luma Vision' },
+  // Without this the OpenGraph fallback names the vendor from og:site_name,
+  // which RoboPromo sets to the bare host -- parts came through as
+  // "www.robopromo.com". Their own itemprop legalName is "RoboPromo LLC".
+  { match: 'robopromo.com', name: 'RoboPromo' },
   { match: 'andymark.com', name: 'AndyMark' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
   { match: 'vexpro.com', name: 'VEXpro' },

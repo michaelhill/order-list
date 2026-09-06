@@ -8,6 +8,7 @@ import {
   bigCommerceToUnified
 } from '../utils/bigcommerce'
 import { fetchSwyftProducts } from '../utils/swyft'
+import { fetchVolusionProducts } from '../utils/volusion'
 
 export default defineTask({
   meta: {
@@ -53,6 +54,13 @@ export default defineTask({
                 .onConflictDoUpdate({
                   target: [productCache.id],
                   set: {
+                    // vendorId too, here and in every branch below. The same
+                    // product id can already be cached under the generic
+                    // vendor vendord invents for a host with no vendors row
+                    // (www.robopromo.com arrived as "www.robopromo"), and
+                    // leaving it stranded the row under an id no vendor
+                    // matches -- invisible to the sync, which joins vendors.
+                    vendorId: vendor.id,
                     productJson: product,
                     updatedAt: new Date(product.updated_at)
                   }
@@ -96,6 +104,8 @@ export default defineTask({
                 .onConflictDoUpdate({
                   target: [productCache.id],
                   set: {
+                    // See the note in the shopify branch above.
+                    vendorId: vendor.id,
                     productJson: JSON.stringify(unified),
                     updatedAt: new Date()
                   }
@@ -129,6 +139,8 @@ export default defineTask({
                 .onConflictDoUpdate({
                   target: [productCache.id],
                   set: {
+                    // See the note in the shopify branch above.
+                    vendorId: vendor.id,
                     productJson: JSON.stringify(unified),
                     updatedAt: new Date()
                   }
@@ -142,6 +154,40 @@ export default defineTask({
           } catch (error) {
             console.error(
               `Failed to scrape Swyft store ${vendor.hostname}:`,
+              error
+            )
+          }
+        } else if (vendor.type === 'volusion') {
+          try {
+            const products = await fetchVolusionProducts(vendor.hostname)
+
+            for (const unified of products) {
+              await db
+                .insert(productCache)
+                .values({
+                  vendorId: vendor.id,
+                  id: `${vendor.hostname}:${unified.handle}`,
+                  productJson: JSON.stringify(unified),
+                  updatedAt: new Date()
+                })
+                .onConflictDoUpdate({
+                  target: [productCache.id],
+                  set: {
+                    // See the note in the shopify branch above.
+                    vendorId: vendor.id,
+                    productJson: JSON.stringify(unified),
+                    updatedAt: new Date()
+                  }
+                })
+            }
+
+            console.log(
+              `Scraped ${products.length} products from Volusion store: `
+              + `${vendor.hostname}`
+            )
+          } catch (error) {
+            console.error(
+              `Failed to scrape Volusion store ${vendor.hostname}:`,
               error
             )
           }

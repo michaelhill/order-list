@@ -141,6 +141,13 @@
       "when": 1788016710887,
       "tag": "0019_seed_lumyn_luma_vendors",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1788016710888,
+      "tag": "0020_seed_robopromo_vendor",
+      "breakpoints": true
     }
   ]
 }
