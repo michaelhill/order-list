@@ -18,6 +18,15 @@ docker compose up -d
 # Dev server -> http://localhost:3000
 bun run dev
 
+# vendord, in a second terminal -> http://localhost:3001
+# Needed in dev for anything that goes through the scraper: the delegated
+# hosts, and the vendors rendered in a browser (Powerwerx). Without it those
+# lookups fall back to a plain fetch, collect the vendor's bot challenge and
+# quietly return nothing -- the degradation working as designed, but
+# indistinguishable from the feature being broken. PM2 keeps it alive in
+# production, so this is a dev-only trap.
+cd vendord && bun run dev
+
 # Lint + typecheck (CI runs both on every push, see .github/workflows/ci.yml)
 bun run lint
 bun run typecheck
@@ -137,6 +146,9 @@ There is no test runner configured; "verification" means lint + typecheck + exer
 ## Environment
 
 Dev config lives in `.env` (gitignored). Most server code reads `process.env.*` directly (not just Nuxt `runtimeConfig`):
+
+**`BETTER_AUTH_URL` must be the origin you are actually browsing.** Better Auth derives its cookie attributes from it, so pointing a dev instance at the production URL makes it issue `__Secure-better-auth.session_token` with `Secure` set — which a browser refuses over `http://localhost`. Sign-in then answers `200` and the session silently never exists, which reads as a wrong password rather than a misconfiguration. The OAuth redirect URI comes from the same value, so the same mistake sends a dev Google sign-in to production after consent. `http://localhost:3000` in dev.
+
 
 - `DATABASE_URL` — local Postgres, e.g. `postgres://postgres:orderr@localhost:5433/postgres`
 - `DATABASE_POOL_MAX` — optional; size of the connection pool, default 10
