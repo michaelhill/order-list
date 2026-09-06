@@ -1,5 +1,5 @@
 import { chromium } from "playwright";
-import type { Browser, Page } from "playwright";
+import type { Browser, BrowserContext, Page } from "playwright";
 
 // Rendering a page in a real browser, for the handful of vendors whose
 // storefront answers a plain fetch with a bot challenge and a browser with the
@@ -16,10 +16,48 @@ import type { Browser, Page } from "playwright";
 // the deploy installs xvfb and PM2 runs vendord inside it. Without a display
 // the launch below throws, which the route reports as a failed render and the
 // caller treats as "could not read", the same as a challenge.
+//
+// **The browser is kept alive between requests.** Launching one costs 250ms to
+// a second locally and more on the droplet, against roughly a second of actual
+// navigation -- so a cold launch per lookup was most of the wall time. It is
+// closed again after a spell of inactivity, so an idle box holds nothing.
 
 const NAV_TIMEOUT_MS = 15_000;
 const CHALLENGE_TIMEOUT_MS = 8_000;
 const CHALLENGE_POLL_MS = 100;
+
+// Long enough to cover a whole ordering session -- a team adds parts over
+// half an hour, and a ten-minute window made them pay for a relaunch in the
+// middle of it -- while still handing the memory back on a box nobody is
+// using. Chromium is roughly 200-300 MB resident against the droplet's
+// ~1.1 GB free, which is the deliberate trade: constant memory for a warm
+// browser.
+const IDLE_SHUTDOWN_MS = 30 * 60 * 1000;
+
+// Chromium's own overheads that a server does not need. Deliberately *not*
+// --no-sandbox or --disable-blink-features=AutomationControlled: the first is
+// a well-known automation tell and the second edits the fingerprint, and this
+// renderer's whole premise is that an unmodified browser is enough.
+const LAUNCH_ARGS = [
+  "--disable-dev-shm-usage",
+  "--disable-background-networking",
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-breakpad",
+  "--disable-component-update",
+  "--disable-default-apps",
+  "--disable-extensions",
+  "--disable-sync",
+  "--metrics-recording-only",
+  "--mute-audio",
+  "--no-first-run"
+];
+
+// Subresources that never affect what gets read out of the DOM. Scripts, XHR
+// and fetch are emphatically not here: the challenges are scripts, and
+// BrickLink's product arrives over XHR after the page shell. Blocking an image
+// does not remove its `src` from the markup, so image URLs still extract.
+const BLOCKED_RESOURCES = new Set(["image", "media", "font", "stylesheet"]);
 
 // Cloudflare's managed-challenge interstitial, Imperva's, and AWS WAF's --
 // the last of which announces itself only through the globals its script sets,
@@ -43,19 +81,54 @@ export interface RenderResult {
   html: string;
   finalUrl: string;
   status: number | null;
-  // How long the challenge took to clear, for the log line -- it is 25-30ms
-  // on a warm edge and worth noticing if it ever is not.
+  // How long the challenge took to clear, for the log line -- it is tens of
+  // milliseconds on a warm edge and worth noticing if it ever is not.
   challengeMs: number | null;
+  // Whether this render paid for a browser launch, so the effect of keeping
+  // one alive is visible in the log rather than merely asserted.
+  launched: boolean;
 }
 
-// One browser at a time. Two concurrent launches would double the memory on a
-// box that has about a gigabyte spare, and these lookups are rare enough that
+let browser: Browser | null = null;
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleIdleShutdown(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    const stale = browser;
+    browser = null;
+    idleTimer = null;
+    if (stale) {
+      stale.close().catch(() => {});
+      console.log("Closed the idle render browser");
+    }
+  }, IDLE_SHUTDOWN_MS);
+  // Never hold the process open on this timer alone.
+  idleTimer.unref?.();
+}
+
+async function getBrowser(): Promise<{ browser: Browser; launched: boolean }> {
+  // isConnected catches a browser that crashed or was killed underneath us,
+  // which on a 2 GB box is a question of when rather than whether.
+  if (browser?.isConnected()) return { browser, launched: false };
+  const started = await chromium.launch({
+    headless: false,
+    args: LAUNCH_ARGS
+  });
+  started.on("disconnected", () => {
+    if (browser === started) browser = null;
+  });
+  browser = started;
+  return { browser: started, launched: true };
+}
+
+// One page at a time. Two concurrent renders would double the memory on a box
+// that has about a gigabyte spare, and these lookups are rare enough that
 // serialising them costs nothing.
 let inFlight: Promise<unknown> = Promise.resolve();
 
 function serialize<T>(work: () => Promise<T>): Promise<T> {
   const next = inFlight.then(work, work);
-  // Keep the chain alive whether or not this link rejected.
   inFlight = next.then(
     () => undefined,
     () => undefined
@@ -85,13 +158,24 @@ export async function renderPage(
   waitForSelector?: string
 ): Promise<RenderResult> {
   return serialize(async () => {
-    let browser: Browser | null = null;
+    // A fresh context per render, so one vendor's cookies and storage never
+    // reach another's page. It costs a few milliseconds against the hundreds
+    // that reusing the browser saves.
+    let context: BrowserContext | null = null;
+    let launched = false;
     try {
-      browser = await chromium.launch({ headless: false });
-      const context = await browser.newContext({
+      const acquired = await getBrowser();
+      launched = acquired.launched;
+      context = await acquired.browser.newContext({
         viewport: { width: 1280, height: 900 }
       });
       const page = await context.newPage();
+      await page.route("**/*", (route) => {
+        return BLOCKED_RESOURCES.has(route.request().resourceType())
+          ? route.abort()
+          : route.continue();
+      });
+
       const response = await page.goto(url, {
         waitUntil: "domcontentloaded",
         timeout: NAV_TIMEOUT_MS
@@ -130,12 +214,15 @@ export async function renderPage(
         html,
         finalUrl: page.url(),
         status: response?.status() ?? null,
-        challengeMs
+        challengeMs,
+        launched
       };
     } finally {
-      // Always, including on a navigation timeout: a leaked Chromium is the
-      // one failure this box cannot absorb.
-      await browser?.close().catch(() => {});
+      // The context always goes, even on a navigation timeout -- a leaked one
+      // holds a renderer process. The browser itself stays for the next
+      // request and is closed by the idle timer instead.
+      await context?.close().catch(() => {});
+      scheduleIdleShutdown();
     }
   });
 }
