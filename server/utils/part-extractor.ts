@@ -107,6 +107,8 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   // which is the manufacturer rather than the store -- a roof bracket came
   // through as "Qual-Craft".
   { match: 'acehardware.com', name: 'Ace Hardware' },
+  // Their own styling carries the article; the host fallback gives "Homedepot".
+  { match: 'homedepot.com', name: 'The Home Depot' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
   { match: 'vexpro.com', name: 'VEXpro' },
   { match: 'ctr-electronics.com', name: 'Cross the Road Electronics' },
@@ -813,6 +815,9 @@ function fromVexUrl(urlObj: URL): ExtractedProduct | null {
 // slug that is the product title with every space turned into a hyphen.
 const LOWES_PRODUCT = /^\/pd\/([^/]+)\/(\d+)\/?$/i
 
+// Both hardware stores here hyphenate the product title to build the slug, so
+// the same reconstruction serves Lowe's and Home Depot.
+//
 // Hardware is sized in fractions, and the slug flattens both "3/4" and "3.375"
 // to the same "3-4"/"3-375" shape -- so "1-2-in" has to be told apart from
 // "2-12-in" or the name comes out meaning something else entirely.
@@ -832,7 +837,19 @@ function isHardwareFraction(numerator: string, denominator: string): boolean {
   return FRACTION_DENOMINATORS.has(d) && n % 2 === 1 && n < d
 }
 
-function titleFromLowesSlug(slug: string): string {
+// A bare dimension -- 10X14, 10X14X2 -- is a size, never a model number.
+const DIMENSION_TOKEN = /^\d+(?:X\d+)+$/
+
+function isModelNumber(token: string): boolean {
+  if (token.length < 5) return false
+  if (token !== token.toUpperCase()) return false
+  if (DIMENSION_TOKEN.test(token)) return false
+  const letters = token.match(/[A-Z]/g)?.length ?? 0
+  const digits = token.match(/\d/g)?.length ?? 0
+  return letters >= 2 && digits >= 2
+}
+
+function titleFromHardwareSlug(slug: string): string {
   const parts = slug.split('-')
   const out: string[] = []
   const isNumber = (value: string | undefined) => !!value && /^\d+$/.test(value)
@@ -855,6 +872,22 @@ function titleFromLowesSlug(slug: string): string {
     out.push(a)
   }
 
+  // Both stores tend to end the slug with the manufacturer's model number --
+  // 42% of Home Depot's URLs and 5% of Lowe's -- which reads as noise on a line
+  // item ("...Shutters in Peaceful Blue ARW101BB311X33SBH"). The product is
+  // still identified by the item number in the URL, which is what either
+  // store's own search takes, so the token is dropped.
+  //
+  // The test is deliberately strict, because the failure that matters is
+  // stripping a *size*: for hardware that is the half of the name carrying the
+  // meaning, the same reason the fractions above are rebuilt. Requiring two
+  // letters spares "10X14", "1000W" and "5000K", and the dimension guard spares
+  // "10X14X2", whose two X's would otherwise read as letters. Erring this way
+  // leaves single-letter model numbers like "G16010" in the title, which merely
+  // looks untidy.
+  const last = out.at(-1)
+  if (last && isModelNumber(last)) out.pop()
+
   // Rejoin a unit to the measurement in front of it, and only there: an
   // unanchored rule also rewrote ordinary words, turning "All in One" into
   // "All-in One".
@@ -867,7 +900,7 @@ function titleFromLowesSlug(slug: string): string {
 function fromLowesUrl(urlObj: URL): ExtractedProduct | null {
   const match = LOWES_PRODUCT.exec(urlObj.pathname)
   if (!match) return null
-  const title = titleFromLowesSlug(match[1]!)
+  const title = titleFromHardwareSlug(match[1]!)
   if (!title) return null
 
   return {
@@ -876,6 +909,44 @@ function fromLowesUrl(urlObj: URL): ExtractedProduct | null {
     price: null,
     currency: 'USD',
     // Lowe's own "Item #", which is what their search and their stores look up.
+    sku: match[2]!,
+    variantId: null,
+    variantTitle: null,
+    variants: []
+  }
+}
+
+// Home Depot is the same story as Lowe's and reached the same way. AkamaiGHost
+// answers a plain fetch with a bare "Access Denied" -- not even a challenge --
+// and Chromium is refused identically whether headless or headed. Their
+// federation-gateway GraphQL API does respond, but only to a storefront key
+// carried in page JS that the block keeps out of reach; harvesting one to get
+// around a control they have deliberately put up is not something to build, and
+// their affiliate product feed is the sanctioned route if this is ever wanted
+// properly. Unlike Lowe's, robots.txt permits /p/ -- the block is technical
+// rather than policy -- but permitted and possible are different things.
+//
+// /p/{slug}/{internetNumber}: the trailing id is the "Internet #" their own
+// search takes, and the slug is the hyphenated title.
+//
+// The slug must carry a hyphen. Without that, /p/qv/{id} -- the quick-view
+// endpoint their own robots.txt disallows -- parses as a product named "qv".
+// Every one of the 45,000 product URLs in their sitemap has a multi-word slug,
+// so nothing real is turned away. Lowe's gets no such rule: 373 of theirs are
+// genuinely single-word.
+const HOME_DEPOT_PRODUCT = /^\/p\/(?:[^/]+\/)*([^/]*-[^/]*)\/(\d+)\/?$/i
+
+function fromHomeDepotUrl(urlObj: URL): ExtractedProduct | null {
+  const match = HOME_DEPOT_PRODUCT.exec(urlObj.pathname)
+  if (!match) return null
+  const title = titleFromHardwareSlug(match[1]!)
+  if (!title) return null
+
+  return {
+    title,
+    description: null,
+    price: null,
+    currency: 'USD',
     sku: match[2]!,
     variantId: null,
     variantTitle: null,
@@ -894,7 +965,8 @@ const URL_ONLY_VENDORS: Array<{
   { domain: 'digikey.ca', parse: fromDigiKeyUrl },
   { domain: 'studica.com', parse: fromStudicaUrl },
   { domain: 'vexrobotics.com', parse: fromVexUrl },
-  { domain: 'lowes.com', parse: fromLowesUrl }
+  { domain: 'lowes.com', parse: fromLowesUrl },
+  { domain: 'homedepot.com', parse: fromHomeDepotUrl }
 ]
 
 // ---- Amazon --------------------------------------------------------------
