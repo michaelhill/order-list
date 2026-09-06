@@ -31,10 +31,21 @@ export function shouldDelegateToScraper(hostname: string): boolean {
 // strategies -- so this list buys page *access*, not a parser.
 //
 // Kept deliberately short. Every entry costs a browser launch, and it only
-// helps where the block is a solvable challenge: Lowe's, Home Depot and VEX
-// answer a flat deny that a browser does not clear either, so adding them
-// would spend the memory for nothing.
-const BROWSER_RENDER_HOSTS = ['powerwerx.com', 'studica.com']
+// helps where the block is a solvable challenge: Lowe's and Home Depot answer
+// a flat deny that a browser does not clear either, so adding them would spend
+// the memory for nothing.
+//
+// VEX is here despite the older note saying a headed browser is "re-blocked
+// after roughly one navigation" -- which turns out not to describe this usage.
+// A fresh browser is launched and closed per lookup, so every request is a
+// first navigation: four consecutive product pages rendered clean, none
+// blocked. It is the same reason their entry stays in URL_ONLY_VENDORS as
+// well, as the fallback for a render that does not happen.
+const BROWSER_RENDER_HOSTS = [
+  'powerwerx.com',
+  'studica.com',
+  'vexrobotics.com'
+]
 
 export function shouldRenderInBrowser(hostname: string): boolean {
   return BROWSER_RENDER_HOSTS.some(domain => hostMatches(hostname, domain))
