@@ -849,7 +849,55 @@ function isModelNumber(token: string): boolean {
   return letters >= 2 && digits >= 2
 }
 
-function titleFromHardwareSlug(slug: string): string {
+// The lower half of a measurement, which may carry a dimension letter straight
+// on the end: Menards writes 69-1-4w for 69-1/4 inches wide, and 527 of the 748
+// measurements in their sitemap look like that -- more than don't. Lowe's and
+// Home Depot always separate the unit, so this costs them nothing.
+const MEASURE_TAIL = /^(\d+)([a-z]{1,2})?$/i
+
+function measureTail(
+  value: string | undefined
+): { digits: string, suffix: string } | null {
+  const match = value ? MEASURE_TAIL.exec(value) : null
+  return match ? { digits: match[1]!, suffix: match[2] ?? '' } : null
+}
+
+// Words left lowercase inside a title. "x" earns its place here: it is the
+// dimension separator in half these names ("62-1/4 x 80"), and capitalising it
+// reads as a word rather than a multiplication sign.
+const TITLE_MINOR_WORDS = new Set([
+  'a', 'an', 'and', 'at', 'by', 'for', 'in', 'of', 'on', 'or', 'per', 'the',
+  'to', 'with', 'x'
+])
+
+// Menards lowercases its whole slug, so a name lifted straight out of one
+// arrives shouting nothing and meaning little ("aston nautis xl ... shower
+// door"). Lowe's and Home Depot keep the real casing in theirs -- "DEWALT",
+// "KILZ", "RUBI" -- so they must not be put through this, which would render
+// those as "Dewalt", "Kilz" and "Rubi".
+function capitalizeTitle(title: string): string {
+  return title
+    .split(' ')
+    .map((word, index) => {
+      // Anything starting with a digit is a measurement. Its own capitals are
+      // the dimension letters written straight onto the number -- 69-1/4w x
+      // 80h, which the store renders 69-1/4"W x 80"H. A letter run only counts
+      // when it sits directly on a digit, so the "lb" in "4-lb" is left alone.
+      if (!/^[a-z]/i.test(word)) {
+        return word.replace(
+          /(\d)([a-z]{1,2})$/,
+          (_, digit, letters) => digit + letters.toUpperCase()
+        )
+      }
+      if (index > 0 && TITLE_MINOR_WORDS.has(word.toLowerCase())) {
+        return word.toLowerCase()
+      }
+      return word.charAt(0).toUpperCase() + word.slice(1)
+    })
+    .join(' ')
+}
+
+function titleFromHardwareSlug(slug: string, capitalize = false): string {
   const parts = slug.split('-')
   const out: string[] = []
   const isNumber = (value: string | undefined) => !!value && /^\d+$/.test(value)
@@ -859,15 +907,25 @@ function titleFromHardwareSlug(slug: string): string {
     const b = parts[i + 1]
     const c = parts[i + 2]
     // "1-1-2-in" is one and a half inches: a whole number, then a fraction.
-    if (isNumber(a) && isNumber(b) && isNumber(c) && isHardwareFraction(b!, c!)) {
-      out.push(`${a}-${b}/${c}`)
-      i += 2
-      continue
-    }
     if (isNumber(a) && isNumber(b)) {
-      out.push(isHardwareFraction(a, b!) ? `${a}/${b}` : `${a}.${b}`)
-      i += 1
-      continue
+      const tail = measureTail(c)
+      if (tail && isHardwareFraction(b!, tail.digits)) {
+        out.push(`${a}-${b}/${tail.digits}${tail.suffix}`)
+        i += 2
+        continue
+      }
+    }
+    if (isNumber(a)) {
+      const tail = measureTail(b)
+      if (tail) {
+        out.push(
+          isHardwareFraction(a, tail.digits)
+            ? `${a}/${tail.digits}${tail.suffix}`
+            : `${a}.${tail.digits}${tail.suffix}`
+        )
+        i += 1
+        continue
+      }
     }
     out.push(a)
   }
@@ -891,10 +949,11 @@ function titleFromHardwareSlug(slug: string): string {
   // Rejoin a unit to the measurement in front of it, and only there: an
   // unanchored rule also rewrote ordinary words, turning "All in One" into
   // "All-in One".
-  return out
+  const title = out
     .join(' ')
     .replace(/(\d)\s+(in|ft|mm|cm|oz|lb)\b/gi, '$1-$2')
     .trim()
+  return capitalize ? capitalizeTitle(title) : title
 }
 
 function fromLowesUrl(urlObj: URL): ExtractedProduct | null {
@@ -954,6 +1013,40 @@ function fromHomeDepotUrl(urlObj: URL): ExtractedProduct | null {
   }
 }
 
+// Menards is behind Imperva Advanced Bot Protection, and unlike the other two
+// the block is selective: their home page, category pages and sitemaps all
+// serve a plain fetch happily, while a product page answers with Imperva's
+// "Pardon Our Interruption" challenge. Chromium is refused harder still, headed
+// or headless -- a bare "Request unsuccessful. Incapsula incident". Probing
+// further only escalated it, with sitemap URLs that had worked minutes earlier
+// starting to answer the interstitial too, so the sensible reading is that
+// automated product access is not on offer and should not be pursued.
+//
+// /main/{category...}/{slug}/{model}/p-{productId}-c-{categoryId}.htm -- the
+// title slug and the model number are the two segments before the last, in
+// every one of the 6,690 product URLs in their sitemap.
+const MENARDS_PRODUCT = /^\/main\/(?:.+\/)?([^/]+)\/([^/]+)\/p-\d+-c-\d+\.htm$/i
+
+function fromMenardsUrl(urlObj: URL): ExtractedProduct | null {
+  const match = MENARDS_PRODUCT.exec(urlObj.pathname)
+  if (!match) return null
+  const title = titleFromHardwareSlug(match[1]!, true)
+  if (!title) return null
+
+  return {
+    title,
+    description: null,
+    price: null,
+    currency: 'USD',
+    // Their model number, which is what the page shows and their search takes.
+    // Upper-cased because the URL lowercases it and the store does not.
+    sku: match[2]!.toUpperCase(),
+    variantId: null,
+    variantTitle: null,
+    variants: []
+  }
+}
+
 const URL_ONLY_VENDORS: Array<{
   domain: string
   parse: (urlObj: URL) => ExtractedProduct | null
@@ -966,7 +1059,9 @@ const URL_ONLY_VENDORS: Array<{
   { domain: 'studica.com', parse: fromStudicaUrl },
   { domain: 'vexrobotics.com', parse: fromVexUrl },
   { domain: 'lowes.com', parse: fromLowesUrl },
-  { domain: 'homedepot.com', parse: fromHomeDepotUrl }
+  { domain: 'homedepot.com', parse: fromHomeDepotUrl },
+  // No FRC_VENDORS entry needed: the host fallback already yields "Menards".
+  { domain: 'menards.com', parse: fromMenardsUrl }
 ]
 
 // ---- Amazon --------------------------------------------------------------
