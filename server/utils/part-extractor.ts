@@ -1,4 +1,5 @@
 import { parseHTML } from 'linkedom'
+import parse, { splitCookiesString } from './set-cookie-parser'
 import type { DpoOptionGroup } from './wcp-dpo'
 import { fetchSailriteVariants, isSailriteHost } from './sailrite'
 import { ROCK_WEST_HOSTS } from './rock-west'
@@ -109,6 +110,10 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   { match: 'acehardware.com', name: 'Ace Hardware' },
   // Two words, and the host fallback gives "Boltdepot".
   { match: 'boltdepot.com', name: 'Bolt Depot' },
+  // Their own styling is one word. Without this the JSON-LD path names the
+  // vendor from the product's `brand`, which is the line it belongs to --
+  // a mounting bracket arrived from "C-more Micro".
+  { match: 'automationdirect.com', name: 'AutomationDirect' },
   // Their own styling carries the article; the host fallback gives "Homedepot".
   { match: 'homedepot.com', name: 'The Home Depot' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
@@ -200,6 +205,29 @@ function cleanText(input: unknown, max = 600): string | null {
 // reaches an order as the literal "GE Tub &amp; Tile Caulk". cleanText already
 // decodes entities and collapses whitespace; a name only needs a shorter cap
 // than a description's.
+// A "name" that is only the SKU is an identifier, not a name. AutomationDirect
+// puts the bare part number in both fields on every product they sell, so a
+// line item read "EA3-BRK" while the page was headed "Panel Mounting Brackets:
+// replacement, 8/pk, for C-more Micro EA3 series touch panels". That real name
+// lives in <title>, trailed by the part number in parentheses and the site
+// name, so take it apart rather than settle for the identifier.
+function titleBesideSku(
+  pageTitle: string | null,
+  sku: string
+): string | null {
+  if (!pageTitle) return null
+  let title = pageTitle
+  // Site branding after the last pipe: "... | AutomationDirect".
+  const brand = title.lastIndexOf(' | ')
+  if (brand > 0) title = title.slice(0, brand)
+  // A trailing parenthetical naming the part number: "(PN# EA3-BRK)".
+  title = title.replace(/\s*\([^)]*\)\s*$/, (match) =>
+    match.toLowerCase().includes(sku.toLowerCase()) ? '' : match)
+  title = cleanName(title) ?? ''
+  // Only worth swapping in if it says more than the identifier did.
+  return title && title.toLowerCase() !== sku.toLowerCase() ? title : null
+}
+
 function cleanName(value: unknown): string | null {
   return cleanText(value, 300)
 }
@@ -214,20 +242,108 @@ function asString(value: unknown): string | null {
   return null
 }
 
+// Reject the loopback/link-local/private ranges, so neither this fetch nor the
+// route that calls it can be pointed at something internal. Exported because
+// both need it: the route validates what the user pasted, and the redirect
+// follower below re-checks every hop.
+export function isBlockedHost(hostname: string): boolean {
+  const host = hostname.toLowerCase()
+  if (host === 'localhost' || host.endsWith('.localhost')) return true
+  if (host === '0.0.0.0' || host === '::1' || host === '[::1]') return true
+  if (/^127\./.test(host)) return true
+  if (/^10\./.test(host)) return true
+  if (/^192\.168\./.test(host)) return true
+  if (/^169\.254\./.test(host)) return true
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true
+  return false
+}
+
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308])
+const MAX_REDIRECTS = 10
+
+interface JarEntry { value: string, domain: string }
+
+// A cookie is kept only for the domain that set it, and sent only back to that
+// domain -- a redirect off to another site must not carry the first one's
+// session with it.
+function storeCookies(
+  res: Response,
+  host: string,
+  jar: Map<string, JarEntry>
+): void {
+  const raw = typeof res.headers.getSetCookie === 'function'
+    ? res.headers.getSetCookie()
+    : splitCookiesString(res.headers.get('set-cookie'))
+  for (const cookie of parse(raw, { silent: true })) {
+    if (!cookie.name) continue
+    const declared = typeof cookie.domain === 'string' ? cookie.domain : null
+    const domain = (declared ?? host).replace(/^\./, '').toLowerCase()
+    if (host !== domain && !host.endsWith(`.${domain}`)) continue
+    jar.set(`${domain}\u0000${cookie.name}`, { value: cookie.value, domain })
+  }
+}
+
+function cookieHeader(
+  jar: Map<string, JarEntry>,
+  host: string
+): string | null {
+  const pairs: string[] = []
+  for (const [key, entry] of jar) {
+    if (host !== entry.domain && !host.endsWith(`.${entry.domain}`)) continue
+    pairs.push(`${key.slice(key.indexOf('\u0000') + 1)}=${entry.value}`)
+  }
+  return pairs.length > 0 ? pairs.join('; ') : null
+}
+
+// Redirects are followed by hand rather than by `redirect: 'follow'`, for two
+// reasons.
+//
+// Cookies. Some storefronts gate a first visit on a redirect that expects the
+// client to carry one: AutomationDirect bounces an anonymous request through an
+// SSO "silent auth" check, and without the cookie that check sets, nothing
+// records that it already ran -- the request ping-pongs between the store and
+// login.automationdirect.com indefinitely. curl with a jar settles it in four
+// hops; Node's fetch, which has no jar, spends its redirect budget and throws,
+// so those products read as unreachable when the page is in fact served.
+//
+// And safety. The route validates the hostname the user pasted, but with
+// `follow` a vendor could redirect us onward to 169.254.169.254 and nothing
+// would look again. Every hop is checked here.
 async function fetchWithUa(
   url: string,
   accept: string,
   signal?: AbortSignal
 ): Promise<Response> {
-  return fetch(url, {
-    signal,
-    redirect: 'follow',
-    headers: {
+  const jar = new Map<string, JarEntry>()
+  let current = url
+
+  for (let hop = 0; ; hop++) {
+    const target = new URL(current)
+    const host = target.hostname.toLowerCase()
+    if (isBlockedHost(host)) {
+      throw new Error(`Refusing to fetch ${host}`)
+    }
+
+    const headers: Record<string, string> = {
       'User-Agent': USER_AGENT,
       'Accept': accept,
       'Accept-Language': 'en-US,en;q=0.9'
     }
-  })
+    const cookies = cookieHeader(jar, host)
+    if (cookies) headers.Cookie = cookies
+
+    const res = await fetch(current, { signal, redirect: 'manual', headers })
+    storeCookies(res, host, jar)
+
+    const location = res.headers.get('location')
+    if (!REDIRECT_STATUS.has(res.status) || !location) return res
+    if (hop >= MAX_REDIRECTS) return res
+
+    // Nothing reads a redirect's body; release it rather than leaving the
+    // connection open for the length of the chain.
+    await res.body?.cancel().catch(() => {})
+    current = new URL(location, current).toString()
+  }
 }
 
 // Image URLs in markup are often protocol-relative ("//cdn/x.jpg") or
@@ -373,6 +489,12 @@ function collectProducts(
 // The markup is Salesforce B2C Commerce's default tiered-pricing template, so
 // this would likely hold for other stores on that platform -- but only Rock
 // West is confirmed, so only Rock West is asked.
+const AUTOMATION_DIRECT_HOSTS = ['automationdirect.com']
+
+function isAutomationDirectHost(hostname: string): boolean {
+  return AUTOMATION_DIRECT_HOSTS.some(domain => hostMatches(hostname, domain))
+}
+
 function isRockWestHost(hostname: string): boolean {
   return ROCK_WEST_HOSTS.some(domain => hostMatches(hostname, domain))
 }
@@ -1271,6 +1393,25 @@ export async function extractPart(
         variants = []
       }
 
+      // `name` stays as the markup gave it, because the ProductGroup variant
+      // titles are matched against it; only what gets shown is swapped.
+      const sku = asString(node.sku) ?? asString(node.mpn) ?? selected?.sku
+      // Only when the markup's name is *nothing but* the SKU. Any vendor who
+      // named their product properly keeps that name: reaching for the page
+      // title regardless appended site branding to six of them -- "… - Ace
+      // Hardware", "… - REV Robotics" -- and put Rock West's part number in
+      // front of its own name.
+      const nameIsSku
+        = !!sku && !!name && name.toLowerCase() === sku.toLowerCase()
+      const displayTitle
+        = (nameIsSku
+          ? titleBesideSku(
+              cleanName(document.querySelector('title')?.textContent),
+              sku!
+            )
+          : null)
+        ?? name
+
       const imageNode = resolveRef(node.image, nodesById)
       const priceBreaks = isRockWestHost(hostname)
         ? rockWestPriceBreaks(html)
@@ -1285,11 +1426,11 @@ export async function extractPart(
           ?? titleCaseHost(hostname),
         source: 'json-ld',
         product: {
-          title: name,
+          title: displayTitle,
           description: cleanText(node.description) ?? ogDescription(),
           price,
           currency: currency ?? 'USD',
-          sku: asString(node.sku) ?? asString(node.mpn) ?? selected?.sku ?? null,
+          sku: sku ?? null,
           image: absoluteUrl(
             // schema.org allows a bare URL, an array, or an ImageObject.
             asString(
@@ -1308,6 +1449,17 @@ export async function extractPart(
           ...(priceBreaks.length > 0 ? { priceBreaks } : {})
         }
       }
+    }
+
+    // AutomationDirect marks up every product with JSON-LD, so a page that
+    // reached here is one of their category listings -- and the OpenGraph
+    // fallback would turn it into a line item named "Productivity1000 DC and
+    // Combo I/O Modules" with no price and nothing orderable behind it, the
+    // same trap WCP's configurator pages and VEX's slug pages set. Their
+    // category and product URLs are not reliably told apart by shape, but the
+    // markup separates them cleanly.
+    if (isAutomationDirectHost(hostname)) {
+      return { url, hostname, vendorName, source: 'none', product: null }
     }
 
     // 2.5 Amazon: read the DOM before the meta tags, which would otherwise
