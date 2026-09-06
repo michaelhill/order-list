@@ -129,6 +129,44 @@ chmod 600 "/home/$APP_USER/.ssh/authorized_keys" 2>/dev/null || true
 mkdir -p /var/log/caddy
 chown -R caddy:caddy /var/log/caddy
 
+log "Headless display and browser (vendord renders a few bot-walled vendors)"
+# A handful of storefronts answer a plain fetch with a bot challenge and a real
+# browser with the page, so vendord renders those in Chromium. It has to be
+# *headed* -- headless is refused by the same challenges -- which on a server
+# means a virtual display.
+#
+# Xvfb runs as its own unit rather than wrapping PM2 in xvfb-run, so the display
+# outlives a vendord restart and the PM2 config stays a plain node invocation.
+apt-get install -y -q xvfb
+
+cat > /etc/systemd/system/xvfb.service <<'UNIT'
+[Unit]
+Description=Virtual framebuffer for headed Chromium
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x900x24 -nolisten tcp
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now xvfb.service
+
+# Chromium plus the shared libraries it needs. The browser is downloaded as the
+# app user so it lands in that account's cache, which is where Playwright looks
+# at runtime; install-deps needs root and runs first.
+npx --yes playwright install-deps chromium || true
+if [ -d "$APP_DIR/vendord/node_modules/playwright" ]; then
+  su - "$APP_USER" -c "cd $APP_DIR/vendord && npx --yes playwright install chromium"
+else
+  echo "vendord dependencies not installed yet -- after the first deploy, run:"
+  echo "  cd $APP_DIR/vendord && npx playwright install chromium"
+fi
+
 log "Done"
 echo "user:    $APP_USER"
 echo "appdir:  $APP_DIR"
@@ -137,3 +175,4 @@ echo "bun:     $(/usr/local/bin/bun --version)"
 echo "docker:  $(docker --version)"
 echo "caddy:   $(caddy version | head -1)"
 echo "pm2:     $(pm2 --version)"
+echo "xvfb:    $(systemctl is-active xvfb.service)"

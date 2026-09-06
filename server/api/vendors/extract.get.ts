@@ -6,8 +6,10 @@ import {
 } from '../../utils/part-extractor'
 import { fetchDigiKeyProduct, isDigiKeyConfigured } from '../../utils/digikey'
 import {
+  fetchRenderedPage,
   fetchVendordProduct,
   shouldDelegateToScraper,
+  shouldRenderInBrowser,
   toExtractionResult
 } from '../../utils/vendord'
 import { fetchOptionGroups, isWcpHost } from '../../utils/wcp-dpo'
@@ -47,7 +49,16 @@ export default defineEventHandler(async (event) => {
   )
 
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 9000)
+  // A browser render is inherently slower than a fetch: measured on the
+  // droplet, launching Chromium and loading a Powerwerx product page takes
+  // 6.3s, which leaves no room inside the 9s that suffices for everything
+  // else. Aborting mid-render would fail the whole request with a 502 rather
+  // than falling back, so those hosts get a longer budget.
+  const needsBrowser = shouldRenderInBrowser(new URL(url).hostname)
+  const timeout = setTimeout(
+    () => controller.abort(),
+    needsBrowser ? 25_000 : 9_000
+  )
   try {
     // DigiKey publishes an API, which beats anything readable off the page —
     // and their pages refuse Workers anyway.
@@ -78,7 +89,17 @@ export default defineEventHandler(async (event) => {
       if (mapped) return mapped
     }
 
-    const result = await extractPart(url, controller.signal)
+    // A few vendors answer this process with a bot challenge and a real
+    // browser with the page. vendord renders those in headed Chromium and
+    // hands back HTML, which extractPart then reads with its ordinary
+    // strategies. A render that fails for any reason -- no display, no
+    // Chromium, challenge never cleared, vendord down -- passes nothing, and
+    // extractPart falls back to fetching the page itself exactly as before.
+    const rendered = needsBrowser
+      ? await fetchRenderedPage(url, controller.signal)
+      : null
+
+    const result = await extractPart(url, controller.signal, rendered?.html)
 
     // WCP's configurator pages are indistinguishable from ordinary products
     // through Shopify's API — one "Default Title" variant, a real-looking

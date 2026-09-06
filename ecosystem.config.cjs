@@ -87,11 +87,19 @@ module.exports = {
         ...fileEnv,
         NODE_ENV: 'production',
         HOST: '127.0.0.1',
-        PORT: '3434'
+        PORT: '3434',
+        // The virtual display provision.sh runs Xvfb on. Chromium is launched
+        // headed -- the challenges these vendors use refuse a headless one --
+        // so without a display the launch throws, the render reports a
+        // failure, and the extractor falls back to fetching the page itself.
+        DISPLAY: ':99'
       },
       exec_mode: 'fork',
       instances: 1,
-      max_memory_restart: '256M',
+      // Chromium is a child process, so its memory is not counted here; this
+      // covers vendord itself plus Playwright's driver, which is why it is
+      // above the 256M that sufficed before.
+      max_memory_restart: '384M',
       time: true
     }
   ]

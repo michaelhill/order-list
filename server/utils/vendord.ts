@@ -25,6 +25,57 @@ export function shouldDelegateToScraper(hostname: string): boolean {
   return DELEGATED_HOSTS.some(domain => hostMatches(hostname, domain))
 }
 
+// Vendors whose storefront answers a plain fetch with a bot challenge and a
+// real browser with the actual page. vendord renders these in headed Chromium
+// and hands back the HTML, which then goes through the ordinary extraction
+// strategies -- so this list buys page *access*, not a parser.
+//
+// Kept deliberately short. Every entry costs a browser launch, and it only
+// helps where the block is a solvable challenge: Lowe's, Home Depot and VEX
+// answer a flat deny that a browser does not clear either, so adding them
+// would spend the memory for nothing.
+const BROWSER_RENDER_HOSTS = ['powerwerx.com', 'studica.com']
+
+export function shouldRenderInBrowser(hostname: string): boolean {
+  return BROWSER_RENDER_HOSTS.some(domain => hostMatches(hostname, domain))
+}
+
+export interface RenderedPage {
+  html: string
+  finalUrl: string
+  status: number | null
+}
+
+// Ask vendord to render a page. Returns null on anything at all going wrong --
+// no display on the box, Chromium missing, the challenge not clearing, vendord
+// down -- because every caller has a fallback and a browser that cannot launch
+// must degrade to the old behaviour rather than fail the lookup.
+export async function fetchRenderedPage(
+  url: string,
+  signal?: AbortSignal
+): Promise<RenderedPage | null> {
+  const target = new URL('/render', VENDORD_ORIGIN)
+  target.searchParams.set('url', url)
+
+  try {
+    const response = await fetch(target, {
+      headers: { accept: 'application/json' },
+      signal
+    })
+    if (!response.ok) return null
+    const data = (await response.json()) as Partial<RenderedPage>
+    return typeof data.html === 'string' && data.html.length > 0
+      ? {
+          html: data.html,
+          finalUrl: data.finalUrl ?? url,
+          status: data.status ?? null
+        }
+      : null
+  } catch {
+    return null
+  }
+}
+
 export function vendordUrl(productUrl: string): string {
   const target = new URL(VENDORD_ORIGIN)
   target.searchParams.set('url', productUrl)

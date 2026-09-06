@@ -18,6 +18,15 @@ docker compose up -d
 # Dev server -> http://localhost:3000
 bun run dev
 
+# vendord, in a second terminal -> http://localhost:3001
+# Needed in dev for anything that goes through the scraper: the delegated
+# hosts, and the vendors rendered in a browser (Powerwerx). Without it those
+# lookups fall back to a plain fetch, collect the vendor's bot challenge and
+# quietly return nothing -- the degradation working as designed, but
+# indistinguishable from the feature being broken. PM2 keeps it alive in
+# production, so this is a dev-only trap.
+cd vendord && bun run dev
+
 # Lint + typecheck (CI runs both on every push, see .github/workflows/ci.yml)
 bun run lint
 bun run typecheck
@@ -137,6 +146,9 @@ There is no test runner configured; "verification" means lint + typecheck + exer
 ## Environment
 
 Dev config lives in `.env` (gitignored). Most server code reads `process.env.*` directly (not just Nuxt `runtimeConfig`):
+
+**`BETTER_AUTH_URL` must be the origin you are actually browsing.** Better Auth derives its cookie attributes from it, so pointing a dev instance at the production URL makes it issue `__Secure-better-auth.session_token` with `Secure` set — which a browser refuses over `http://localhost`. Sign-in then answers `200` and the session silently never exists, which reads as a wrong password rather than a misconfiguration. The OAuth redirect URI comes from the same value, so the same mistake sends a dev Google sign-in to production after consent. `http://localhost:3000` in dev.
+
 
 - `DATABASE_URL` — local Postgres, e.g. `postgres://postgres:orderr@localhost:5433/postgres`
 - `DATABASE_POOL_MAX` — optional; size of the connection pool, default 10
@@ -288,6 +300,22 @@ Every route calls `assertOrderInOrg()` first — a receipt id alone must never b
   **A `WebPage` is allowed to hang the product off `mainEntity`**, and reading only the top-level `@type` missed it. Rock West Composites (Salesforce B2C Commerce) marks its pages up that way — `WebPage` with the real `Product`, complete with `sku`, `offers.price` and `image`, one level down — so the OpenGraph fallback took over and every part arrived with a title and nothing else. schema.org defines `mainEntity` as "the primary entity described in this page", so a Product found there *is* the product, never an incidental mention; both `collectProducts` and `collectById` descend into it.
 
   **Rock West's quantity discounts are in the markup, not the JSON-LD**, which quotes only the single-unit price. Their tier table (`<span class="tier-quantity" data-quantity data-price>`) becomes `priceBreaks`, the same field DigiKey fills, so `OrderEditorSlideover.vue` already renders the tiers and applies the one the entered quantity reaches. It needs no extra request — the tiers are in the page already fetched — and attributes are read by name rather than position, since a template is free to reorder them and a positional regex would fail by silently finding nothing. Fewer than two tiers is treated as no schedule at all, because a lone tier is just the ordinary price restated. Thresholds vary by product (2+/5+, 6+/25+, 10+/50+) and some products have none. The markup is that platform's default tiered-pricing template so it would likely hold for other stores on it, but only Rock West is confirmed and only Rock West is asked.
+
+**A few vendors are rendered in a real browser.** `BROWSER_RENDER_HOSTS` in `server/utils/vendord.ts` names them; `extract.get.ts` asks vendord to load the page in headed Chromium and passes the HTML to `extractPart`, which then reads it with the ordinary strategies. The browser buys page *access*, not a parser.
+
+Several things about it are deliberate:
+
+- **It lives in vendord, not the app.** Chromium is by far the heaviest thing on a 1 vCPU / 2 GB box, and vendord is the process that can afford to die: if a render exhausts memory it takes the scraper down, the site keeps serving, and the extractor falls back to fetching the page itself.
+- **Headed, under Xvfb.** Headless Chromium is refused by these challenges — measured against Powerwerx, headless gets 403 and headed gets the page — so `provision.sh` installs `xvfb`, runs it as its own systemd unit on `:99`, and `ecosystem.config.cjs` passes `DISPLAY=:99` to vendord. A unit rather than `xvfb-run` so the display outlives a vendord restart.
+- **Every failure degrades.** No display, no Chromium, challenge never clears, vendord down — all return null, and `extractPart` falls back to its own fetch, which is exactly what it did before. Nothing about this path can make a lookup fail that used to succeed.
+- **One browser at a time**, launched per request and closed in a `finally`. Two concurrent launches would double the memory on a box with about a gigabyte spare, and a leaked Chromium is the one thing it cannot absorb.
+- **The list is short on purpose.** It only helps where the block is a solvable challenge. Lowe's, Home Depot and VEX answer a flat deny that a browser does not clear either, so adding them would spend the memory for nothing.
+- **Playwright is a dependency of the *root* `package.json`, not just vendord's.** vendord ships as a Nitro bundle whose traced `.output/server/node_modules` is deliberately excluded from the upload, so its externals resolve by walking up into `/srv/parts/node_modules` — which is what the droplet's root `bun install` fills. Listing it only in `vendord/package.json` installs it nowhere the droplet can see.
+- **These hosts get a longer request budget.** Measured on the droplet, launching Chromium and loading a Powerwerx product page takes 6.3s against the 9s that suffices for everything else; aborting mid-render would fail the request with a 502 instead of falling back, so `extract.get.ts` allows 25s when the host needs a browser.
+
+**A rendered page beats a URL guess**, so `URL_ONLY_VENDORS` is skipped when the caller supplies HTML — Studica is in both lists, using the render when there is one and its slug when the browser could not produce one. The URL parser is still applied at the end of `extractPart` for that case, so a render that yields nothing readable falls back rather than returning nothing.
+
+**Powerwerx needs its price and variants read out of the page.** Their JSON-LD names the product and stops: the Offer is an `AggregateOffer` carrying `lowPrice` 4.79 against `highPrice` 1089.19 over 62 offers, and there is no `sku` anywhere in it. That low price is a "from" figure that reads like a real one — the same trap WCP's configurator pages set — so `powerwerxFields` **overrides** it with the first `.product-price` on the page ($73.99, what the page actually shows) rather than filling in behind it. Their variants are a run of sibling elements tied together by the product id in the sku element's own id (`sku-2336` alongside `price-value-2336`): one `specAttr` per option, then the sku, then the price. All 62 come back, which matches the `offerCount` in the AggregateOffer — a useful cross-check. The option's unit lives in its *name* rather than its value ("Wire Gauge (AWG)" with value "2"), so it is appended, or the picker reads "2 / 25 ft." and loses what the 2 measures.
 
 Three escape hatches exist for vendors the extractor can't read directly:
 
