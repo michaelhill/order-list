@@ -101,6 +101,16 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   // Nothing on their pages names the store -- no og:site_name, no brand in the
   // JSON-LD -- so the host fallback produced the runic "Rockwestcomposites".
   { match: 'rockwestcomposites.com', name: 'Rock West Composites' },
+  // Their own styling, apostrophe included; the host fallback gives "Lowes".
+  { match: 'lowes.com', name: "Lowe's" },
+  // Without this the JSON-LD path names the vendor from the product's `brand`,
+  // which is the manufacturer rather than the store -- a roof bracket came
+  // through as "Qual-Craft".
+  { match: 'acehardware.com', name: 'Ace Hardware' },
+  // Two words, and the host fallback gives "Boltdepot".
+  { match: 'boltdepot.com', name: 'Bolt Depot' },
+  // Their own styling carries the article; the host fallback gives "Homedepot".
+  { match: 'homedepot.com', name: 'The Home Depot' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
   { match: 'vexpro.com', name: 'VEXpro' },
   { match: 'ctr-electronics.com', name: 'Cross the Road Electronics' },
@@ -183,6 +193,15 @@ function cleanText(input: unknown, max = 600): string | null {
   if (!text) return null
   if (text.length > max) text = `${text.slice(0, max - 1).trimEnd()}…`
   return text
+}
+
+// JSON-LD sits inside a <script>, so it needs no HTML escaping -- but vendors
+// escape it anyway. Ace Hardware's product names arrive holding "&amp;", which
+// reaches an order as the literal "GE Tub &amp; Tile Caulk". cleanText already
+// decodes entities and collapses whitespace; a name only needs a shorter cap
+// than a description's.
+function cleanName(value: unknown): string | null {
+  return cleanText(value, 300)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -400,7 +419,7 @@ function variantsFromProductGroup(
   const variants: ExtractedVariant[] = []
   for (const variant of raw) {
     if (!isRecord(variant)) continue
-    const name = asString(variant.name)
+    const name = cleanName(variant.name)
     if (!name) continue
     const offers = Array.isArray(variant.offers) ? variant.offers[0] : variant.offers
     const id
@@ -490,10 +509,27 @@ function priceFromOffers(offers: unknown): {
     const nested = priceFromOffers(offers.offers)
     if (nested.price != null) return nested
   }
-  return {
-    price: parsePrice(offers.price ?? offers.lowPrice ?? offers.highPrice),
-    currency: asString(offers.priceCurrency)
+  const direct = parsePrice(offers.price ?? offers.lowPrice ?? offers.highPrice)
+  if (direct != null) {
+    return { price: direct, currency: asString(offers.priceCurrency) }
   }
+  // schema.org also lets the amount sit in a priceSpecification instead of on
+  // the offer itself, and Ace Hardware's pages only put it there: their Offer
+  // carries availability and a return policy, with the money in a
+  // UnitPriceSpecification beside them. Reading the offer alone found a
+  // complete-looking product priced null. The recursion works because a
+  // PriceSpecification names its fields `price`/`priceCurrency` too; the first
+  // entry carrying an amount wins, as it does for a list of offers.
+  if (offers.priceSpecification) {
+    const spec = priceFromOffers(offers.priceSpecification)
+    if (spec.price != null) {
+      return {
+        price: spec.price,
+        currency: spec.currency ?? asString(offers.priceCurrency)
+      }
+    }
+  }
+  return { price: null, currency: asString(offers.priceCurrency) }
 }
 
 function brandName(brand: unknown): string | null {
@@ -767,6 +803,252 @@ function fromVexUrl(urlObj: URL): ExtractedProduct | null {
   }
 }
 
+// Lowe's sits behind Akamai Bot Manager and there is no server-side way in.
+// A plain fetch is answered 403; a full browser header set gets the behavioural
+// challenge interstitial ("Powered and protected by Akamai") rather than the
+// page; and Chromium, headless or headed, is answered "Access Denied" outright.
+// Delegating to vendord would achieve nothing, since it makes the same kind of
+// request. Their robots.txt also disallows /pd/*/*/pricing/*, so the price is
+// off-limits by their own policy and not merely unreachable -- the same
+// standing as McMaster. Don't add a scraping path for them.
+//
+// What the URL does carry is genuinely useful. /pd/{slug}/{itemNumber} holds
+// the item number Lowe's search and stores index by (their "Item #"), and a
+// slug that is the product title with every space turned into a hyphen.
+const LOWES_PRODUCT = /^\/pd\/([^/]+)\/(\d+)\/?$/i
+
+// Both hardware stores here hyphenate the product title to build the slug, so
+// the same reconstruction serves Lowe's and Home Depot.
+//
+// Hardware is sized in fractions, and the slug flattens both "3/4" and "3.375"
+// to the same "3-4"/"3-375" shape -- so "1-2-in" has to be told apart from
+// "2-12-in" or the name comes out meaning something else entirely.
+//
+// A fraction is recoverable because of what hardware fractions look like: the
+// denominator is a power of two, and a fully reduced numerator over one is
+// always odd (2/4 would have been written 1/2). A leading zero settles it the
+// other way, since nothing is sized "0/944". Checked against the 7,855 product
+// URLs in their sitemap: 3/4-in, 1/8-in and 1/32-in come back as fractions,
+// while 3.375-in, 94.48-in, 0.944-in, 1.023-in and 3.5625-in stay decimal.
+const FRACTION_DENOMINATORS = new Set([2, 4, 8, 16, 32, 64])
+
+function isHardwareFraction(numerator: string, denominator: string): boolean {
+  if (denominator.startsWith('0')) return false
+  const n = Number(numerator)
+  const d = Number(denominator)
+  return FRACTION_DENOMINATORS.has(d) && n % 2 === 1 && n < d
+}
+
+// A bare dimension -- 10X14, 10X14X2 -- is a size, never a model number.
+const DIMENSION_TOKEN = /^\d+(?:X\d+)+$/
+
+function isModelNumber(token: string): boolean {
+  if (token.length < 5) return false
+  if (token !== token.toUpperCase()) return false
+  if (DIMENSION_TOKEN.test(token)) return false
+  const letters = token.match(/[A-Z]/g)?.length ?? 0
+  const digits = token.match(/\d/g)?.length ?? 0
+  return letters >= 2 && digits >= 2
+}
+
+// The lower half of a measurement, which may carry a dimension letter straight
+// on the end: Menards writes 69-1-4w for 69-1/4 inches wide, and 527 of the 748
+// measurements in their sitemap look like that -- more than don't. Lowe's and
+// Home Depot always separate the unit, so this costs them nothing.
+const MEASURE_TAIL = /^(\d+)([a-z]{1,2})?$/i
+
+function measureTail(
+  value: string | undefined
+): { digits: string, suffix: string } | null {
+  const match = value ? MEASURE_TAIL.exec(value) : null
+  return match ? { digits: match[1]!, suffix: match[2] ?? '' } : null
+}
+
+// Words left lowercase inside a title. "x" earns its place here: it is the
+// dimension separator in half these names ("62-1/4 x 80"), and capitalising it
+// reads as a word rather than a multiplication sign.
+const TITLE_MINOR_WORDS = new Set([
+  'a', 'an', 'and', 'at', 'by', 'for', 'in', 'of', 'on', 'or', 'per', 'the',
+  'to', 'with', 'x'
+])
+
+// Menards lowercases its whole slug, so a name lifted straight out of one
+// arrives shouting nothing and meaning little ("aston nautis xl ... shower
+// door"). Lowe's and Home Depot keep the real casing in theirs -- "DEWALT",
+// "KILZ", "RUBI" -- so they must not be put through this, which would render
+// those as "Dewalt", "Kilz" and "Rubi".
+function capitalizeTitle(title: string): string {
+  return title
+    .split(' ')
+    .map((word, index) => {
+      // Anything starting with a digit is a measurement. Its own capitals are
+      // the dimension letters written straight onto the number -- 69-1/4w x
+      // 80h, which the store renders 69-1/4"W x 80"H. A letter run only counts
+      // when it sits directly on a digit, so the "lb" in "4-lb" is left alone.
+      if (!/^[a-z]/i.test(word)) {
+        return word.replace(
+          /(\d)([a-z]{1,2})$/,
+          (_, digit, letters) => digit + letters.toUpperCase()
+        )
+      }
+      if (index > 0 && TITLE_MINOR_WORDS.has(word.toLowerCase())) {
+        return word.toLowerCase()
+      }
+      return word.charAt(0).toUpperCase() + word.slice(1)
+    })
+    .join(' ')
+}
+
+function titleFromHardwareSlug(slug: string, capitalize = false): string {
+  const parts = slug.split('-')
+  const out: string[] = []
+  const isNumber = (value: string | undefined) => !!value && /^\d+$/.test(value)
+
+  for (let i = 0; i < parts.length; i++) {
+    const a = parts[i]!
+    const b = parts[i + 1]
+    const c = parts[i + 2]
+    // "1-1-2-in" is one and a half inches: a whole number, then a fraction.
+    if (isNumber(a) && isNumber(b)) {
+      const tail = measureTail(c)
+      if (tail && isHardwareFraction(b!, tail.digits)) {
+        out.push(`${a}-${b}/${tail.digits}${tail.suffix}`)
+        i += 2
+        continue
+      }
+    }
+    if (isNumber(a)) {
+      const tail = measureTail(b)
+      if (tail) {
+        out.push(
+          isHardwareFraction(a, tail.digits)
+            ? `${a}/${tail.digits}${tail.suffix}`
+            : `${a}.${tail.digits}${tail.suffix}`
+        )
+        i += 1
+        continue
+      }
+    }
+    out.push(a)
+  }
+
+  // Both stores tend to end the slug with the manufacturer's model number --
+  // 42% of Home Depot's URLs and 5% of Lowe's -- which reads as noise on a line
+  // item ("...Shutters in Peaceful Blue ARW101BB311X33SBH"). The product is
+  // still identified by the item number in the URL, which is what either
+  // store's own search takes, so the token is dropped.
+  //
+  // The test is deliberately strict, because the failure that matters is
+  // stripping a *size*: for hardware that is the half of the name carrying the
+  // meaning, the same reason the fractions above are rebuilt. Requiring two
+  // letters spares "10X14", "1000W" and "5000K", and the dimension guard spares
+  // "10X14X2", whose two X's would otherwise read as letters. Erring this way
+  // leaves single-letter model numbers like "G16010" in the title, which merely
+  // looks untidy.
+  const last = out.at(-1)
+  if (last && isModelNumber(last)) out.pop()
+
+  // Rejoin a unit to the measurement in front of it, and only there: an
+  // unanchored rule also rewrote ordinary words, turning "All in One" into
+  // "All-in One".
+  const title = out
+    .join(' ')
+    .replace(/(\d)\s+(in|ft|mm|cm|oz|lb)\b/gi, '$1-$2')
+    .trim()
+  return capitalize ? capitalizeTitle(title) : title
+}
+
+function fromLowesUrl(urlObj: URL): ExtractedProduct | null {
+  const match = LOWES_PRODUCT.exec(urlObj.pathname)
+  if (!match) return null
+  const title = titleFromHardwareSlug(match[1]!)
+  if (!title) return null
+
+  return {
+    title,
+    description: null,
+    price: null,
+    currency: 'USD',
+    // Lowe's own "Item #", which is what their search and their stores look up.
+    sku: match[2]!,
+    variantId: null,
+    variantTitle: null,
+    variants: []
+  }
+}
+
+// Home Depot is the same story as Lowe's and reached the same way. AkamaiGHost
+// answers a plain fetch with a bare "Access Denied" -- not even a challenge --
+// and Chromium is refused identically whether headless or headed. Their
+// federation-gateway GraphQL API does respond, but only to a storefront key
+// carried in page JS that the block keeps out of reach; harvesting one to get
+// around a control they have deliberately put up is not something to build, and
+// their affiliate product feed is the sanctioned route if this is ever wanted
+// properly. Unlike Lowe's, robots.txt permits /p/ -- the block is technical
+// rather than policy -- but permitted and possible are different things.
+//
+// /p/{slug}/{internetNumber}: the trailing id is the "Internet #" their own
+// search takes, and the slug is the hyphenated title.
+//
+// The slug must carry a hyphen. Without that, /p/qv/{id} -- the quick-view
+// endpoint their own robots.txt disallows -- parses as a product named "qv".
+// Every one of the 45,000 product URLs in their sitemap has a multi-word slug,
+// so nothing real is turned away. Lowe's gets no such rule: 373 of theirs are
+// genuinely single-word.
+const HOME_DEPOT_PRODUCT = /^\/p\/(?:[^/]+\/)*([^/]*-[^/]*)\/(\d+)\/?$/i
+
+function fromHomeDepotUrl(urlObj: URL): ExtractedProduct | null {
+  const match = HOME_DEPOT_PRODUCT.exec(urlObj.pathname)
+  if (!match) return null
+  const title = titleFromHardwareSlug(match[1]!)
+  if (!title) return null
+
+  return {
+    title,
+    description: null,
+    price: null,
+    currency: 'USD',
+    sku: match[2]!,
+    variantId: null,
+    variantTitle: null,
+    variants: []
+  }
+}
+
+// Menards is behind Imperva Advanced Bot Protection, and unlike the other two
+// the block is selective: their home page, category pages and sitemaps all
+// serve a plain fetch happily, while a product page answers with Imperva's
+// "Pardon Our Interruption" challenge. Chromium is refused harder still, headed
+// or headless -- a bare "Request unsuccessful. Incapsula incident". Probing
+// further only escalated it, with sitemap URLs that had worked minutes earlier
+// starting to answer the interstitial too, so the sensible reading is that
+// automated product access is not on offer and should not be pursued.
+//
+// /main/{category...}/{slug}/{model}/p-{productId}-c-{categoryId}.htm -- the
+// title slug and the model number are the two segments before the last, in
+// every one of the 6,690 product URLs in their sitemap.
+const MENARDS_PRODUCT = /^\/main\/(?:.+\/)?([^/]+)\/([^/]+)\/p-\d+-c-\d+\.htm$/i
+
+function fromMenardsUrl(urlObj: URL): ExtractedProduct | null {
+  const match = MENARDS_PRODUCT.exec(urlObj.pathname)
+  if (!match) return null
+  const title = titleFromHardwareSlug(match[1]!, true)
+  if (!title) return null
+
+  return {
+    title,
+    description: null,
+    price: null,
+    currency: 'USD',
+    // Their model number, which is what the page shows and their search takes.
+    // Upper-cased because the URL lowercases it and the store does not.
+    sku: match[2]!.toUpperCase(),
+    variantId: null,
+    variantTitle: null,
+    variants: []
+  }
+}
+
 const URL_ONLY_VENDORS: Array<{
   domain: string
   parse: (urlObj: URL) => ExtractedProduct | null
@@ -777,7 +1059,11 @@ const URL_ONLY_VENDORS: Array<{
   // Canadian teams order from the .ca storefront; same URL shapes.
   { domain: 'digikey.ca', parse: fromDigiKeyUrl },
   { domain: 'studica.com', parse: fromStudicaUrl },
-  { domain: 'vexrobotics.com', parse: fromVexUrl }
+  { domain: 'vexrobotics.com', parse: fromVexUrl },
+  { domain: 'lowes.com', parse: fromLowesUrl },
+  { domain: 'homedepot.com', parse: fromHomeDepotUrl },
+  // No FRC_VENDORS entry needed: the host fallback already yields "Menards".
+  { domain: 'menards.com', parse: fromMenardsUrl }
 ]
 
 // ---- Amazon --------------------------------------------------------------
@@ -950,7 +1236,7 @@ export async function extractPart(
       }
     }
     const node = products[0] ?? productGroups[0]
-    const name = node ? asString(node.name) : null
+    const name = node ? cleanName(node.name) : null
     if (node && name) {
       const groupVariants = variantsFromProductGroup(node, name, urlObj)
       // Honor ?variant= / ?id= deep links; otherwise the first variant, which

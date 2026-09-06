@@ -131,17 +131,22 @@
             </div>
 
             <div
-              v-if="isUrlDerived"
+              v-if="isUrlDerived || lookupUnreadable"
               class="flex min-w-0 items-start gap-2 rounded-lg border border-warning-300/70 bg-warning-50/50 p-3 text-xs dark:border-warning-800/70 dark:bg-warning-950/30"
             >
               <UIcon
                 name="i-lucide-alert-triangle"
                 class="mt-0.5 size-4 shrink-0 text-warning-600 dark:text-warning-400"
               />
-              <p class="min-w-0 text-gray-600 dark:text-gray-300">
+              <p v-if="isUrlDerived" class="min-w-0 text-gray-600 dark:text-gray-300">
                 This vendor blocks automated lookups, so these details come
                 from the link alone and there is no price. Check the name and
                 fill in the price from the product page.
+              </p>
+              <p v-else class="min-w-0 text-gray-600 dark:text-gray-300">
+                This vendor blocks automated lookups and their link carries no
+                product details, so nothing could be read from it. Fill in the
+                name and price from the product page.
               </p>
             </div>
 
@@ -431,6 +436,14 @@ const variantOptions = ref<VariantOption[]>([])
 // filled-in name read as a successful lookup.
 const isUrlDerived = ref(false)
 
+// Neither lookup could read the page at all -- distinct from isUrlDerived,
+// where a name was recovered from the link and only the price is missing.
+// Bolt Depot is the case: a Cloudflare challenge defeats the extractor, their
+// URL carries an id and no name, and vendord answers "Product not found", so
+// every field but the vendor stays empty. Without this the form simply sat
+// there blank, which reads as the lookup never having run.
+const lookupUnreadable = ref(false)
+
 // WCP's configurator pages (Itoris DPO) answer with the parts they actually
 // sell rather than with one orderable product. Held for the current lookup
 // only: picking a part switches the form to that part's own product page.
@@ -568,6 +581,7 @@ watchEffect((onCleanup) => {
     priceBreaks.value = []
     optionGroups.value = []
     isUrlDerived.value = false
+    lookupUnreadable.value = false
     isLookingUpVendor.value = false
     return
   }
@@ -617,6 +631,19 @@ watchEffect((onCleanup) => {
         return
       }
 
+      // The page could not be read, but the hostname still names the store.
+      // Keep that before trying the scraper, because for a vendor behind a bot
+      // wall it is the only thing either lookup will produce: Bolt Depot's
+      // Cloudflare challenge defeats the extractor, and vendord answers "Product
+      // not found on vendor site", so the throw below used to leave the form
+      // completely empty and the buyer retyped a vendor we had already named.
+      // A scraper that does succeed overwrites this with its own vendor.
+      if (extracted.vendorName) {
+        formState.vendorId = extracted.vendorName
+      }
+      // Cleared again below if the scraper manages to find the product.
+      lookupUnreadable.value = true
+
       // Fallback: the external scraper service (BigCommerce/Amazon/etc.).
       const data = await $fetch<VendorProductResponse>('/api/vendors', {
         query: { url: externalUrl },
@@ -646,6 +673,7 @@ async function applyExtractedProduct(data: ExtractionResponse) {
   }
 
   isUrlDerived.value = data.source === 'url' && product.price == null
+  lookupUnreadable.value = false
 
   if (data.vendorName) {
     formState.vendorId = data.vendorName
@@ -720,6 +748,7 @@ async function applyScraperProduct(data: VendorProductResponse) {
     variantOptions.value = []
     return
   }
+  lookupUnreadable.value = false
 
   if (product.title) {
     formState.partName = product.title
@@ -784,6 +813,7 @@ function initializeFormState() {
   optionGroups.value = []
   optionFilter.value = ''
   isUrlDerived.value = false
+  lookupUnreadable.value = false
 }
 
 function resetFormState() {
