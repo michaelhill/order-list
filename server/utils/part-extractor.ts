@@ -61,6 +61,9 @@ export interface ExtractionResult {
     | 'amazon'
     | 'digikey'
     | 'json-ld'
+    // Read out of the page's DOM by a vendor-specific reader, where the page
+    // publishes no structured data at all.
+    | 'html'
     | 'opengraph'
     | 'scraper'
     | 'url'
@@ -554,6 +557,91 @@ function powerwerxFields(document: ParsedDoc): {
   }
 
   return { price, sku, variants }
+}
+
+// BrickLink is a marketplace, not a storefront, and that shapes everything
+// here. A store URL is /{storeSlug}?itemID=N#/shop: the same LEGO part is
+// listed by many sellers at their own prices and conditions, so the seller is
+// part of the vendor's identity -- "BrickLink — Old Brick", not "BrickLink".
+// Without that, two parts bought from two sellers group into one order that
+// cannot be checked out as one, since findOrCreatePendingOrder groups by
+// vendor and each seller is a separate checkout.
+//
+// The page carries no JSON-LD and no OpenGraph at all, and its <title> is the
+// store rather than the item, so the generic fallbacks would name a part after
+// the shop. Everything below is read from the item row the SPA renders.
+const BRICKLINK_HOSTS = ['bricklink.com']
+
+function isBrickLinkHost(hostname: string): boolean {
+  return BRICKLINK_HOSTS.some(domain => hostMatches(hostname, domain))
+}
+
+// "Old Brick - BrickLink.com" -> "Old Brick". Falls back to the store slug in
+// the path, which is what the URL carries when the title has not rendered.
+function brickLinkSeller(document: ParsedDoc, urlObj: URL): string | null {
+  const title = document.querySelector('title')?.textContent ?? ''
+  const named = /^(.*?)\s*-\s*BrickLink\.com\s*$/i.exec(title.trim())?.[1]
+  if (named) return named.trim()
+  const slug = urlObj.pathname.split('/').filter(Boolean)[0]
+  return slug ? slug.replace(/_/g, ' ') : null
+}
+
+function fromBrickLink(
+  document: ParsedDoc,
+  urlObj: URL
+): { vendorName: string, product: ExtractedProduct } | null {
+  const row = document.querySelector('.item.table-row')
+  if (!row) return null
+
+  // The name is split across <strong> runs -- colour, then the part name.
+  const parts: string[] = []
+  for (const strong of row.querySelectorAll('.description p strong')) {
+    const value = cleanName(strong.textContent)
+    if (value) parts.push(value)
+  }
+  const title = parts.join(' ').replace(/\s+/g, ' ').trim()
+  if (!title) return null
+
+  // The breadcrumb ends with the BrickLink part number (54821pb02), which is
+  // the identifier that means anything across sellers.
+  const crumbs = [...row.querySelectorAll('.bl-breadcrumb a')]
+  const sku = cleanName(crumbs.at(-1)?.textContent)
+
+  // "Price: EUR 99.5299(~US $115.6733)" for a seller pricing in their own
+  // currency, or a plain "US $12.34". Take the dollar figure either way: it is
+  // what BrickLink shows the buyer, and this schema stores a bare number with
+  // no currency beside it, so a euro amount would be recorded as dollars.
+  const buy = row.querySelector('.buy')?.textContent ?? ''
+  const price = parsePrice(/US\s*\$\s*([\d,]+\.?\d*)/i.exec(buy)?.[1] ?? null)
+  const converted = /~\s*US\s*\$/i.test(buy)
+  const native = /Price:\s*([A-Z]{3}\s*[\d,.]+)/.exec(buy)?.[1]
+
+  const condition = cleanName(row.querySelector('.condition')?.textContent)
+  const notes = [
+    condition ? `Condition: ${condition}` : null,
+    // Say so on the record when the figure is BrickLink's own conversion
+    // rather than the amount the seller charges.
+    converted && native ? `Seller price ${native}; US $ is converted` : null
+  ].filter(Boolean).join('. ')
+
+  const seller = brickLinkSeller(document, urlObj)
+  return {
+    vendorName: seller ? `BrickLink — ${seller}` : 'BrickLink',
+    product: {
+      title,
+      description: notes || null,
+      price,
+      currency: 'USD',
+      sku,
+      image: absoluteUrl(
+        row.querySelector('.image img')?.getAttribute('src') ?? null,
+        urlObj
+      ),
+      variantId: null,
+      variantTitle: null,
+      variants: []
+    }
+  }
 }
 
 const AUTOMATION_DIRECT_HOSTS = ['automationdirect.com']
@@ -1470,6 +1558,22 @@ export async function extractPart(
         'meta[property="og:image"]',
         'meta[name="twitter:image"]'
       ])
+
+    // 1.5 BrickLink: a marketplace with no JSON-LD, no OpenGraph, and a title
+    // naming the shop rather than the item, so read its item row directly
+    // before the generic fallbacks get a chance to name a part after a store.
+    if (isBrickLinkHost(hostname)) {
+      const found = fromBrickLink(document, urlObj)
+      return found
+        ? {
+            url,
+            hostname,
+            vendorName: found.vendorName,
+            source: 'html',
+            product: found.product
+          }
+        : { url, hostname, vendorName: 'BrickLink', source: 'none', product: null }
+    }
 
     // 2. JSON-LD Product, or the ProductGroup that stands in for one.
     const products: Record<string, unknown>[] = []
