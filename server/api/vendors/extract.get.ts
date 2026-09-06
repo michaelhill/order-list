@@ -1,5 +1,9 @@
 import { z } from 'zod'
-import { digiKeyPartFromUrl, extractPart } from '../../utils/part-extractor'
+import {
+  digiKeyPartFromUrl,
+  extractPart,
+  isBlockedHost
+} from '../../utils/part-extractor'
 import { fetchDigiKeyProduct, isDigiKeyConfigured } from '../../utils/digikey'
 import {
   fetchVendordProduct,
@@ -9,19 +13,8 @@ import {
 import { fetchOptionGroups, isWcpHost } from '../../utils/wcp-dpo'
 import { requireOrganizationContext } from '../../utils/session'
 
-// Reject URLs that point at the loopback/link-local/private ranges so this
-// endpoint can't be turned into an SSRF proxy against internal services.
-function isBlockedHost(hostname: string): boolean {
-  const host = hostname.toLowerCase()
-  if (host === 'localhost' || host.endsWith('.localhost')) return true
-  if (host === '0.0.0.0' || host === '::1' || host === '[::1]') return true
-  if (/^127\./.test(host)) return true
-  if (/^10\./.test(host)) return true
-  if (/^192\.168\./.test(host)) return true
-  if (/^169\.254\./.test(host)) return true
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true
-  return false
-}
+// isBlockedHost lives with the extractor now: this validates the URL the user
+// pasted, and the extractor's redirect follower re-checks every hop it makes.
 
 export default defineEventHandler(async (event) => {
   // Only authenticated org members may trigger outbound fetches.
