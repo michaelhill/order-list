@@ -114,6 +114,8 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   // vendor from the product's `brand`, which is the line it belongs to --
   // a mounting bracket arrived from "C-more Micro".
   { match: 'automationdirect.com', name: 'AutomationDirect' },
+  // Two words; the host fallback gives "Harborfreight".
+  { match: 'harborfreight.com', name: 'Harbor Freight' },
   // Their own styling carries the article; the host fallback gives "Homedepot".
   { match: 'homedepot.com', name: 'The Home Depot' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
@@ -1171,6 +1173,45 @@ function fromMenardsUrl(urlObj: URL): ExtractedProduct | null {
   }
 }
 
+// Harbor Freight is behind PerimeterX. Their homepage is served -- it is cached
+// hard at the edge -- but product and category pages both answer 403 with a
+// px-captcha body, so there is nothing to read and nothing for vendord to add.
+// robots.txt is readable and permits product pages, so this is a bot control
+// rather than a policy about crawlers.
+//
+// /{slug}-{itemNumber}.html, one path segment: the trailing digits are the
+// "Item #" printed on their shelf tags and taken by their own search, and the
+// slug is the lowercase title, so it goes through the same reconstruction as
+// Lowe's, Home Depot and Menards.
+//
+// The corpus behind this is thinner than for those three, because the sitemap
+// and every category page are blocked: it is one product URL taken from their
+// own homepage plus the nine non-product links beside it. The single path
+// segment is what separates them -- /deals.html and /join-inside-track-club.html
+// carry no trailing number, and /collections/inside-track-club-deals.html is
+// two segments. The slug reconstruction itself is the one already validated
+// against 60,000 URLs from the other three.
+const HARBOR_FREIGHT_PRODUCT = /^\/([a-z0-9-]+)-(\d+)\.html$/i
+
+function fromHarborFreightUrl(urlObj: URL): ExtractedProduct | null {
+  const match = HARBOR_FREIGHT_PRODUCT.exec(urlObj.pathname)
+  if (!match) return null
+  // Their slugs are lowercase, as Menards' are, so the title is rebuilt.
+  const title = titleFromHardwareSlug(match[1]!, true)
+  if (!title) return null
+
+  return {
+    title,
+    description: null,
+    price: null,
+    currency: 'USD',
+    sku: match[2]!,
+    variantId: null,
+    variantTitle: null,
+    variants: []
+  }
+}
+
 const URL_ONLY_VENDORS: Array<{
   domain: string
   parse: (urlObj: URL) => ExtractedProduct | null
@@ -1185,7 +1226,8 @@ const URL_ONLY_VENDORS: Array<{
   { domain: 'lowes.com', parse: fromLowesUrl },
   { domain: 'homedepot.com', parse: fromHomeDepotUrl },
   // No FRC_VENDORS entry needed: the host fallback already yields "Menards".
-  { domain: 'menards.com', parse: fromMenardsUrl }
+  { domain: 'menards.com', parse: fromMenardsUrl },
+  { domain: 'harborfreight.com', parse: fromHarborFreightUrl }
 ]
 
 // ---- Amazon --------------------------------------------------------------
