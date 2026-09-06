@@ -1,6 +1,7 @@
 import { parseHTML } from 'linkedom'
 import type { DpoOptionGroup } from './wcp-dpo'
 import { fetchSailriteVariants, isSailriteHost } from './sailrite'
+import { ROCK_WEST_HOSTS } from './rock-west'
 
 // Self-contained product extractor: given a product URL, reach out to the site
 // and pull structured details. Tries, in order:
@@ -353,8 +354,6 @@ function collectProducts(
 // The markup is Salesforce B2C Commerce's default tiered-pricing template, so
 // this would likely hold for other stores on that platform -- but only Rock
 // West is confirmed, so only Rock West is asked.
-const ROCK_WEST_HOSTS = ['rockwestcomposites.com']
-
 function isRockWestHost(hostname: string): boolean {
   return ROCK_WEST_HOSTS.some(domain => hostMatches(hostname, domain))
 }
