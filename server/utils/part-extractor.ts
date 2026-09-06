@@ -103,6 +103,10 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   { match: 'rockwestcomposites.com', name: 'Rock West Composites' },
   // Their own styling, apostrophe included; the host fallback gives "Lowes".
   { match: 'lowes.com', name: "Lowe's" },
+  // Without this the JSON-LD path names the vendor from the product's `brand`,
+  // which is the manufacturer rather than the store -- a roof bracket came
+  // through as "Qual-Craft".
+  { match: 'acehardware.com', name: 'Ace Hardware' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
   { match: 'vexpro.com', name: 'VEXpro' },
   { match: 'ctr-electronics.com', name: 'Cross the Road Electronics' },
@@ -185,6 +189,15 @@ function cleanText(input: unknown, max = 600): string | null {
   if (!text) return null
   if (text.length > max) text = `${text.slice(0, max - 1).trimEnd()}…`
   return text
+}
+
+// JSON-LD sits inside a <script>, so it needs no HTML escaping -- but vendors
+// escape it anyway. Ace Hardware's product names arrive holding "&amp;", which
+// reaches an order as the literal "GE Tub &amp; Tile Caulk". cleanText already
+// decodes entities and collapses whitespace; a name only needs a shorter cap
+// than a description's.
+function cleanName(value: unknown): string | null {
+  return cleanText(value, 300)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -402,7 +415,7 @@ function variantsFromProductGroup(
   const variants: ExtractedVariant[] = []
   for (const variant of raw) {
     if (!isRecord(variant)) continue
-    const name = asString(variant.name)
+    const name = cleanName(variant.name)
     if (!name) continue
     const offers = Array.isArray(variant.offers) ? variant.offers[0] : variant.offers
     const id
@@ -492,10 +505,27 @@ function priceFromOffers(offers: unknown): {
     const nested = priceFromOffers(offers.offers)
     if (nested.price != null) return nested
   }
-  return {
-    price: parsePrice(offers.price ?? offers.lowPrice ?? offers.highPrice),
-    currency: asString(offers.priceCurrency)
+  const direct = parsePrice(offers.price ?? offers.lowPrice ?? offers.highPrice)
+  if (direct != null) {
+    return { price: direct, currency: asString(offers.priceCurrency) }
   }
+  // schema.org also lets the amount sit in a priceSpecification instead of on
+  // the offer itself, and Ace Hardware's pages only put it there: their Offer
+  // carries availability and a return policy, with the money in a
+  // UnitPriceSpecification beside them. Reading the offer alone found a
+  // complete-looking product priced null. The recursion works because a
+  // PriceSpecification names its fields `price`/`priceCurrency` too; the first
+  // entry carrying an amount wins, as it does for a list of offers.
+  if (offers.priceSpecification) {
+    const spec = priceFromOffers(offers.priceSpecification)
+    if (spec.price != null) {
+      return {
+        price: spec.price,
+        currency: spec.currency ?? asString(offers.priceCurrency)
+      }
+    }
+  }
+  return { price: null, currency: asString(offers.priceCurrency) }
 }
 
 function brandName(brand: unknown): string | null {
@@ -1037,7 +1067,7 @@ export async function extractPart(
       }
     }
     const node = products[0] ?? productGroups[0]
-    const name = node ? asString(node.name) : null
+    const name = node ? cleanName(node.name) : null
     if (node && name) {
       const groupVariants = variantsFromProductGroup(node, name, urlObj)
       // Honor ?variant= / ?id= deep links; otherwise the first variant, which
