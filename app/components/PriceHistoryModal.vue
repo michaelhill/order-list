@@ -66,14 +66,21 @@ function formatDate(value: string | null): string {
   });
 }
 
-// A product observed only once has no history to draw — and on the morning
-// after the first nightly run, that is every product. A chart of one point is a
-// dot on an axis, so say what is actually known instead.
-const DAY = 24 * 60 * 60 * 1000;
+// A price seen exactly once is an instant, not a history: there is no window to
+// draw it across. Every product is in that state between the deploy that seeds
+// the baseline and the first nightly run that confirms it.
+//
+// `lastSeenAt > recordedAt` is precisely "we have looked more than once and it
+// was still this price", which is the whole question — so ask that, not how
+// much wall-clock time has passed. An earlier version required a full day
+// between the two, which conflated elapsed time with number of observations and
+// suppressed the chart for every product on the first night: the deploy records
+// a baseline in the evening, the nightly confirms it a few hours later, and the
+// span is real evidence of a held price but nowhere near 24 hours.
 const tooNewToPlot = computed(() => {
   if (points.value.length !== 1) return false;
   const only = points.value[0]!;
-  return Date.parse(only.lastSeenAt) - Date.parse(only.recordedAt) < DAY;
+  return Date.parse(only.lastSeenAt) <= Date.parse(only.recordedAt);
 });
 
 const current = computed(() => points.value.at(-1)?.price ?? null);
