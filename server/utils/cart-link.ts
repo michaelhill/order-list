@@ -39,6 +39,13 @@ import {
   playingWithFusionProductId,
   PLAYING_WITH_FUSION_HOSTS
 } from './playing-with-fusion'
+import {
+  ROCK_WEST_HOSTS,
+  rockWestAddFields,
+  rockWestAddUrl,
+  rockWestCartUrl,
+  rockWestSku
+} from './rock-west'
 import { SITE_HOST } from './site'
 import type { OrderRecord, OrderItemRecord } from './order-service'
 
@@ -147,6 +154,7 @@ type CartPlatform =
   | 'digikey'
   | 'bigcommerce'
   | 'playing-with-fusion'
+  | 'rock-west'
 
 // FastAdd takes DigiKey part numbers and quantities straight off a URL:
 // https://forum.digikey.com/t/digikey-fastadd-.../61356
@@ -178,6 +186,9 @@ function detectPlatform(
     PLAYING_WITH_FUSION_HOSTS.some(domain => hostMatches(host, domain))
   ) {
     return 'playing-with-fusion'
+  }
+  if (ROCK_WEST_HOSTS.some(domain => hostMatches(host, domain))) {
+    return 'rock-west'
   }
   // Before the Shopify check: DigiKey product URLs also contain /products/,
   // so the path heuristic below would otherwise claim them.
@@ -464,6 +475,61 @@ function buildPlayingWithFusionCart(
   }
 }
 
+// Rock West adds one part per POST, and the field it wants is the product's
+// SKU. Items usually carry one already (the slideover stores it), so the
+// lookups here are only for those that don't -- and a part whose SKU cannot be
+// established is excluded rather than posted with a guess, for the reason in
+// rock-west.ts: the wrong id adds a priceless line and reports success.
+async function buildRockWestCart(
+  order: OrderRecord,
+  host: string,
+  empty: Omit<CartLinkResult, 'reason'>,
+  signal?: AbortSignal
+): Promise<CartLinkResult> {
+  const needsLookup = order.items.filter(
+    item => item.externalUrl && !rockWestSku(item.variantId)
+  )
+  const products = await loadProducts(
+    [...new Set(needsLookup.map(item => item.externalUrl!))],
+    signal
+  )
+
+  const addLinks: CartAddLink[] = []
+  const included: CartLinkItem[] = []
+  const excluded: CartLinkItem[] = []
+
+  for (const item of order.items) {
+    const fromItem = rockWestSku(item.variantId)
+    const extraction = item.externalUrl
+      ? products.get(item.externalUrl)
+      : undefined
+    const sku = fromItem ?? rockWestSku(extraction?.product?.sku)
+    if (!sku) {
+      excluded.push(summarize(item))
+      continue
+    }
+    addLinks.push({
+      id: item.id,
+      partName: item.partName,
+      quantity: item.quantity,
+      url: rockWestAddUrl(host),
+      postFields: rockWestAddFields(sku, item.quantity)
+    })
+    included.push(summarize(item))
+  }
+
+  if (addLinks.length === 0) return { ...empty, reason: 'no-variants' }
+
+  return {
+    url: null,
+    addLinks,
+    cartUrl: rockWestCartUrl(host),
+    included,
+    excluded,
+    reason: 'ok'
+  }
+}
+
 export async function buildCartLink(
   order: OrderRecord,
   signal?: AbortSignal
@@ -488,6 +554,9 @@ export async function buildCartLink(
   }
   if (platform === 'playing-with-fusion') {
     return buildPlayingWithFusionCart(order, host, empty)
+  }
+  if (platform === 'rock-west') {
+    return buildRockWestCart(order, host, empty, signal)
   }
 
   // Only parts we can't already read a variant id off of need a lookup.
