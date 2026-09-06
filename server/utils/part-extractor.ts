@@ -626,6 +626,11 @@ function fromBrickLink(
   const buy = row.querySelector('.buy')?.textContent ?? ''
   const price = parsePrice(/US\s*\$\s*([\d,]+\.?\d*)/i.exec(buy)?.[1] ?? null)
   const converted = /~\s*US\s*\$/i.test(buy)
+  // The seller's own figure, whatever currency they price in. Recorded
+  // whenever it differs from the dollar amount -- including when there is no
+  // dollar amount at all, which happens when BrickLink converts into some
+  // other currency for the viewer and leaves `price` null. Losing it then
+  // would leave a line item with no indication of what the thing costs.
   const native = /Price:\s*([A-Z]{3}\s*[\d,.]+)/.exec(buy)?.[1]
 
   const condition = cleanName(row.querySelector('.condition')?.textContent)
@@ -633,7 +638,10 @@ function fromBrickLink(
     condition ? `Condition: ${condition}` : null,
     // Say so on the record when the figure is BrickLink's own conversion
     // rather than the amount the seller charges.
-    converted && native ? `Seller price ${native}; US $ is converted` : null
+    native && converted ? `Seller price ${native}; US $ is converted` : null,
+    native && !converted && price === null
+      ? `Seller price ${native}; no US $ conversion shown, enter the price`
+      : null
   ].filter(Boolean).join('. ')
 
   const seller = brickLinkSeller(document, urlObj)
