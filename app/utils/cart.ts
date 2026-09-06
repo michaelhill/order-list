@@ -57,7 +57,12 @@ export function isPerItemCartVendor(order: Order): boolean {
   return !!host && PER_ITEM_HOSTS.test(host)
 }
 
+// Mirrors NO_CART_HOSTS on the server: stores whose URLs read as Shopify but
+// which serve none of its cart routes, so there is nothing to hand off to.
+const NO_CART_HOSTS = /(^|\.)bambulab\.com$/i
+
 function hasSupportedPlatform(order: Order, host: string): boolean {
+  if (NO_CART_HOSTS.test(host)) return false
   if (/(^|\.)amazon\.[a-z]{2,3}(\.[a-z]{2})?$/i.test(host)) return true
   if (/(^|\.)digikey\.(com|ca)$/i.test(host)) return true
   if (order.vendorType === 'bigcommerce' || PER_ITEM_HOSTS.test(host)) {

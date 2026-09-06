@@ -93,6 +93,10 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   // "www.robopromo.com". Their own itemprop legalName is "RoboPromo LLC".
   { match: 'robopromo.com', name: 'RoboPromo' },
   { match: 'andymark.com', name: 'AndyMark' },
+  // Their og:site_name is the regional storefront, "Bambu Lab US Store"; the
+  // brand is what belongs on a line item. Matched on the apex so the other
+  // regional stores (eu., uk.) resolve the same way.
+  { match: 'bambulab.com', name: 'Bambu Lab' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
   { match: 'vexpro.com', name: 'VEXpro' },
   { match: 'ctr-electronics.com', name: 'Cross the Road Electronics' },
@@ -306,18 +310,80 @@ async function tryShopify(
 
 // ---- JSON-LD -------------------------------------------------------------
 
-function collectProducts(node: unknown, out: Record<string, unknown>[]): void {
+// Products and ProductGroups are collected into separate lists so a page
+// carrying both still prefers the plain Product. Neither recursion descends
+// into `hasVariant`, so a group's choices never surface as products of their
+// own.
+function collectProducts(
+  node: unknown,
+  out: Record<string, unknown>[],
+  groups: Record<string, unknown>[]
+): void {
   if (Array.isArray(node)) {
-    for (const item of node) collectProducts(item, out)
+    for (const item of node) collectProducts(item, out, groups)
     return
   }
   if (!isRecord(node)) return
-  if ('@graph' in node) collectProducts(node['@graph'], out)
+  if ('@graph' in node) collectProducts(node['@graph'], out, groups)
   const type = node['@type']
-  const isProduct
-    = type === 'Product'
-    || (Array.isArray(type) && type.includes('Product'))
-  if (isProduct) out.push(node)
+  const types = Array.isArray(type) ? type : [type]
+  if (types.includes('Product')) out.push(node)
+  else if (types.includes('ProductGroup')) groups.push(node)
+}
+
+// Shopify's newer storefronts describe an options product as a schema.org
+// ProductGroup: the group holds the name and description, and every choice is
+// a Product under `hasVariant` carrying its own price. Matching `@type:
+// Product` alone found nothing on those pages, so the OpenGraph fallback took
+// over and the part arrived with a title and no price at all. Bambu Lab's
+// store is one, and it has no second way in -- /products/{handle}.json,
+// /products.json and /cart.js all 404 there, so the Shopify path never runs.
+function variantsFromProductGroup(
+  group: Record<string, unknown>,
+  groupName: string,
+  base: URL
+): ExtractedVariant[] {
+  const raw = group.hasVariant
+  if (!Array.isArray(raw)) return []
+  const prefix = `${groupName} - `
+  const variants: ExtractedVariant[] = []
+  for (const variant of raw) {
+    if (!isRecord(variant)) continue
+    const name = asString(variant.name)
+    if (!name) continue
+    const offers = Array.isArray(variant.offers) ? variant.offers[0] : variant.offers
+    const id
+      = variantIdFromUrl(isRecord(offers) ? asString(offers.url) : null, base)
+      ?? asString(variant.productID)
+      ?? ''
+    const sku = asString(variant.sku)
+    // Shopify names a variant "{product} - {options}"; the picker wants only
+    // the options half.
+    let title = name.startsWith(prefix) ? name.slice(prefix.length) : name
+    if (!title || title === 'Default Title') title = groupName
+    variants.push({
+      id,
+      // The markup falls back to the variant id when a product carries no SKU
+      // of its own, which every Bambu Lab part does. Storing that would put a
+      // Shopify internal id in front of the buyer as a part number.
+      sku: sku && sku !== id ? sku : null,
+      title,
+      price: priceFromOffers(offers).price
+    })
+  }
+  return variants
+}
+
+// A ProductGroup's offers link to the variant as ?id= (Shopify's own markup)
+// or ?variant= (the canonical product URL form).
+function variantIdFromUrl(value: string | null, base: URL): string | null {
+  if (!value) return null
+  try {
+    const params = new URL(value, base).searchParams
+    return params.get('id') ?? params.get('variant')
+  } catch {
+    return null
+  }
 }
 
 // schema.org lets a node point at another by reference rather than nesting it,
@@ -804,9 +870,17 @@ export async function extractPart(
       )
     const ogVendor = () =>
       getMeta(document, ['meta[property="og:site_name"]'])
+    // A Shopify ProductGroup carries no image of its own, and og:image is the
+    // same picture the page leads with.
+    const ogImage = () =>
+      getMeta(document, [
+        'meta[property="og:image"]',
+        'meta[name="twitter:image"]'
+      ])
 
-    // 2. JSON-LD Product.
+    // 2. JSON-LD Product, or the ProductGroup that stands in for one.
     const products: Record<string, unknown>[] = []
+    const productGroups: Record<string, unknown>[] = []
     // Indexed across every block, not just the one the Product came from --
     // the node a reference names is routinely in a different <script>.
     const nodesById = new Map<string, Record<string, unknown>>()
@@ -817,25 +891,49 @@ export async function extractPart(
       if (!raw) continue
       try {
         const parsed = JSON.parse(raw)
-        collectProducts(parsed, products)
+        collectProducts(parsed, products, productGroups)
         collectById(parsed, nodesById)
       } catch {
         // Ignore malformed JSON-LD blocks.
       }
     }
-    const node = products[0]
+    const node = products[0] ?? productGroups[0]
     const name = node ? asString(node.name) : null
     if (node && name) {
-      const { price, currency } = priceFromOffers(
-        resolveRef(node.offers, nodesById)
-      )
+      const groupVariants = variantsFromProductGroup(node, name, urlObj)
+      // Honor ?variant= / ?id= deep links; otherwise the first variant, which
+      // is the one the page itself opens on.
+      const requested
+        = urlObj.searchParams.get('variant') ?? urlObj.searchParams.get('id')
+      const selected
+        = (requested && groupVariants.find(v => v.id === requested))
+        || groupVariants[0]
+        || null
+
+      const own = priceFromOffers(resolveRef(node.offers, nodesById))
+      // A group has no offers of its own; the chosen variant is the price.
+      const price = own.price ?? selected?.price ?? null
+      const currency = own.currency
+
+      let variants: ExtractedVariant[]
+      if (groupVariants.length > 0) {
+        // Only surface a picker when there's a real choice to make -- the same
+        // rule the Shopify path applies.
+        const hasChoice
+          = groupVariants.length > 1
+          || groupVariants.some(variant => variant.title !== name)
+        variants = hasChoice ? groupVariants : []
+      } else if (isSailriteHost(hostname)) {
+        // Sailrite prices per colour, length and width, and the page shows
+        // only the base article. See server/utils/sailrite.ts -- one page
+        // fetch per combination, run together, so the picker carries real
+        // prices.
+        variants = await fetchSailriteVariants(urlObj, html, USER_AGENT, signal)
+      } else {
+        variants = []
+      }
+
       const imageNode = resolveRef(node.image, nodesById)
-      // Sailrite prices per colour, length and width, and the page shows only
-      // the base article. See server/utils/sailrite.ts -- one page fetch per
-      // combination, run together, so the picker can carry real prices.
-      const jsonLdVariants = isSailriteHost(hostname)
-        ? await fetchSailriteVariants(urlObj, html, USER_AGENT, signal)
-        : []
       return {
         url,
         hostname,
@@ -850,20 +948,22 @@ export async function extractPart(
           description: cleanText(node.description) ?? ogDescription(),
           price,
           currency: currency ?? 'USD',
-          sku: asString(node.sku) ?? asString(node.mpn),
+          sku: asString(node.sku) ?? asString(node.mpn) ?? selected?.sku ?? null,
           image: absoluteUrl(
             // schema.org allows a bare URL, an array, or an ImageObject.
             asString(
               Array.isArray(imageNode) ? imageNode[0] : imageNode
             ) ?? asString(
               (imageNode as Record<string, unknown> | undefined)?.url
-            ),
+            ) ?? ogImage(),
             urlObj
           ),
-          // Neither fallback source exposes platform variant ids.
-          variantId: null,
-          variantTitle: null,
-          variants: jsonLdVariants
+          // A ProductGroup names the platform's variant ids; the other
+          // fallback sources expose none.
+          variantId: selected?.id || null,
+          variantTitle:
+            selected && selected.title !== name ? selected.title : null,
+          variants
         }
       }
     }
