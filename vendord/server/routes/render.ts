@@ -43,11 +43,13 @@ export default eventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: "Host not allowed" });
   }
 
+  const startedAt = Date.now();
   try {
     const result = await renderPage(parsed.toString(), waitFor);
     console.log(
-      `Rendered ${parsed.hostname} in a browser: ${result.html.length} bytes`
-      + `, status ${result.status}`
+      `Rendered ${parsed.hostname} in ${Date.now() - startedAt}ms`
+      + ` (${result.launched ? "cold launch" : "warm browser"}): `
+      + `${result.html.length} bytes, status ${result.status}`
       + (result.challengeMs === null
         ? ""
         : `, challenge cleared in ${result.challengeMs}ms`)
