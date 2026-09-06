@@ -44,6 +44,15 @@ import type { OrderRecord, OrderItemRecord } from './order-service'
 
 const SHOPIFY_VARIANT_ID = /^\d+$/
 
+// Stores that look like Shopify by their URLs but serve none of its routes.
+// Bambu Lab runs a custom storefront over Shopify's checkout: /products/{handle}
+// reads as a Shopify path, and their schema.org ProductGroup even hands over
+// genuine variant ids — but /cart/{id}:{qty}, /cart.js and /products.json all
+// 404, so a permalink built from those ids is a dead link. Without this the
+// button appears and quietly sends the buyer to a 404, which is worse than not
+// offering it.
+const NO_CART_HOSTS = ['bambulab.com']
+
 // Shopify product URLs end at the handle — /products/{handle}, sometimes under
 // /collections/{collection}. Handles are slugs built from the product title, so
 // they carry letters. A bare numeric segment (playingwithfusion.com/products/118)
@@ -157,6 +166,7 @@ function detectPlatform(
   order: OrderRecord,
   host: string
 ): CartPlatform | null {
+  if (NO_CART_HOSTS.some(domain => hostMatches(host, domain))) return null
   if (order.vendorType === 'amazon' || isAmazonHost(host)) return 'amazon'
   if (
     order.vendorType === 'bigcommerce'
