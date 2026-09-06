@@ -41,14 +41,24 @@ export function shouldDelegateToScraper(hostname: string): boolean {
 // first navigation: four consecutive product pages rendered clean, none
 // blocked. It is the same reason their entry stays in URL_ONLY_VENDORS as
 // well, as the fallback for a render that does not happen.
-const BROWSER_RENDER_HOSTS = [
-  'powerwerx.com',
-  'studica.com',
-  'vexrobotics.com'
+//
+// The selector, where present, is something to wait for once the challenge
+// clears: a single-page storefront answers with a shell and fetches the
+// product over XHR afterwards, so returning at that point would hand back an
+// empty page. Only BrickLink needs it; the rest are server-rendered.
+const BROWSER_RENDER_HOSTS: Array<{ domain: string, waitFor?: string }> = [
+  { domain: 'powerwerx.com' },
+  { domain: 'studica.com' },
+  { domain: 'vexrobotics.com' },
+  { domain: 'bricklink.com', waitFor: '.item.table-row' }
 ]
 
 export function shouldRenderInBrowser(hostname: string): boolean {
-  return BROWSER_RENDER_HOSTS.some(domain => hostMatches(hostname, domain))
+  return BROWSER_RENDER_HOSTS.some(v => hostMatches(hostname, v.domain))
+}
+
+function renderWaitFor(hostname: string): string | undefined {
+  return BROWSER_RENDER_HOSTS.find(v => hostMatches(hostname, v.domain))?.waitFor
 }
 
 export interface RenderedPage {
@@ -67,6 +77,8 @@ export async function fetchRenderedPage(
 ): Promise<RenderedPage | null> {
   const target = new URL('/render', VENDORD_ORIGIN)
   target.searchParams.set('url', url)
+  const waitFor = renderWaitFor(new URL(url).hostname)
+  if (waitFor) target.searchParams.set('waitFor', waitFor)
 
   try {
     const response = await fetch(target, {

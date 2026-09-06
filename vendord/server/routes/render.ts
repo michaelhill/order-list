@@ -20,8 +20,16 @@ function isBlockedHost(hostname: string): boolean {
 }
 
 export default eventHandler(async (event) => {
-  const raw = getQuery(event).url;
+  const query = getQuery(event);
+  const raw = query.url;
   const url = typeof raw === "string" ? raw.trim() : "";
+  // Optional: a selector to wait for once the challenge clears, for the
+  // storefronts that load their product over XHR.
+  const waitForRaw = query.waitFor;
+  const waitFor
+    = typeof waitForRaw === "string" && waitForRaw.trim().length > 0
+      ? waitForRaw.trim().slice(0, 120)
+      : undefined;
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -36,7 +44,7 @@ export default eventHandler(async (event) => {
   }
 
   try {
-    const result = await renderPage(parsed.toString());
+    const result = await renderPage(parsed.toString(), waitFor);
     console.log(
       `Rendered ${parsed.hostname} in a browser: ${result.html.length} bytes`
       + `, status ${result.status}`

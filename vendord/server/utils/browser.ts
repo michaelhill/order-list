@@ -1,5 +1,5 @@
 import { chromium } from "playwright";
-import type { Browser } from "playwright";
+import type { Browser, Page } from "playwright";
 
 // Rendering a page in a real browser, for the handful of vendors whose
 // storefront answers a plain fetch with a bot challenge and a browser with the
@@ -21,14 +21,23 @@ const NAV_TIMEOUT_MS = 15_000;
 const CHALLENGE_TIMEOUT_MS = 8_000;
 const CHALLENGE_POLL_MS = 100;
 
-// Cloudflare's managed-challenge interstitial, and Imperva's.
+// Cloudflare's managed-challenge interstitial, Imperva's, and AWS WAF's --
+// the last of which announces itself only through the globals its script sets,
+// since its page has an empty <title> and no visible text at all.
 const CHALLENGE_MARKERS = [
   "Just a moment",
   "Attention Required",
   "Checking your browser",
   "Pardon Our Interruption",
-  "cf-browser-verification"
+  "cf-browser-verification",
+  "awsWafCookieDomainList",
+  "gokuProps"
 ];
+
+// How long to keep waiting for a selector once the challenge is out of the
+// way. Only needed by single-page storefronts, where clearing the wall reveals
+// a shell and the product arrives over XHR afterwards.
+const SELECTOR_TIMEOUT_MS = 12_000;
 
 export interface RenderResult {
   html: string;
@@ -58,7 +67,23 @@ function isChallenge(html: string): boolean {
   return CHALLENGE_MARKERS.some(marker => html.includes(marker));
 }
 
-export async function renderPage(url: string): Promise<RenderResult> {
+// A challenge that clears by reloading -- AWS WAF's does -- will be mid-flight
+// when the poll below asks for the content, and Playwright refuses with
+// "Unable to retrieve content because the page is navigating". That is a
+// transient state, not a failure, so treat it as "nothing yet" and ask again
+// on the next tick rather than letting it abort the render.
+async function contentOrNull(page: Page): Promise<string | null> {
+  try {
+    return await page.content();
+  } catch {
+    return null;
+  }
+}
+
+export async function renderPage(
+  url: string,
+  waitForSelector?: string
+): Promise<RenderResult> {
   return serialize(async () => {
     let browser: Browser | null = null;
     try {
@@ -75,17 +100,30 @@ export async function renderPage(url: string): Promise<RenderResult> {
       // The challenge replaces itself once solved, so poll rather than sleep a
       // fixed amount: it clears in tens of milliseconds when it clears at all.
       const start = Date.now();
-      let html = await page.content();
+      let html = (await contentOrNull(page)) ?? "";
       let challengeMs: number | null = null;
-      if (isChallenge(html)) {
+      if (html === "" || isChallenge(html)) {
         while (Date.now() - start < CHALLENGE_TIMEOUT_MS) {
           await page.waitForTimeout(CHALLENGE_POLL_MS);
-          html = await page.content();
+          const next = await contentOrNull(page);
+          if (next === null) continue;
+          html = next;
           if (!isChallenge(html)) {
             challengeMs = Date.now() - start;
             break;
           }
         }
+      }
+
+      // A single-page storefront answers the challenge with a shell and loads
+      // the product over XHR, so the caller can name something to wait for.
+      // Missing it is not an error: the page is returned as it stands and the
+      // extractor decides whether it found anything.
+      if (waitForSelector) {
+        await page
+          .waitForSelector(waitForSelector, { timeout: SELECTOR_TIMEOUT_MS })
+          .catch(() => {});
+        html = (await contentOrNull(page)) ?? html;
       }
 
       return {
