@@ -1,5 +1,5 @@
 import type { UnifiedProduct } from './bigcommerce'
-import { extractPart } from '../../../server/utils/part-extractor'
+import { productsFromUrls } from './product-urls'
 
 // RoboPromo runs Volusion, an older hosted platform with none of the catalogue
 // endpoints the other scrapers use -- no /products.json, no storefront GraphQL,
@@ -56,35 +56,6 @@ export async function fetchVolusionProducts(
     throw new Error(`No products found in ${hostname}/pindex.asp`)
   }
 
-  const products: UnifiedProduct[] = []
-  for (const url of urls) {
-    try {
-      const result = await extractPart(url)
-      const product = result.product
-      // A page that yields no title is a redirect or a retired product, not
-      // something to put in the index under an empty name.
-      if (!product?.title) continue
-
-      const sku = skuFromUrl(url)
-      const unified: UnifiedProduct = {
-        title: product.title,
-        // sync builds the link as `https://{hostname}/{handle}` for anything
-        // that isn't shopify, so the handle keeps the /product_p/ segment.
-        handle: new URL(url).pathname.replace(/^\//, ''),
-        description: product.description ?? 'no description'
-      }
-      if (product.price != null) unified.price = product.price
-      if (product.image) unified.image = product.image
-      if (sku) {
-        // sync reads `sku || id` off this field for the searchable SKU list.
-        unified.variants = [{ id: sku, title: 'Default', price: product.price ?? undefined }]
-      }
-      products.push(unified)
-    } catch {
-      // One unreachable product page should not cost the other thirty-six.
-    }
-    await new Promise(resolve => setTimeout(resolve, 250))
-  }
-
-  return products
+  // The page markup never carries the product code; the URL does.
+  return productsFromUrls(urls, { skuFromUrl })
 }
