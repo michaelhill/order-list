@@ -101,6 +101,8 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   // Nothing on their pages names the store -- no og:site_name, no brand in the
   // JSON-LD -- so the host fallback produced the runic "Rockwestcomposites".
   { match: 'rockwestcomposites.com', name: 'Rock West Composites' },
+  // Their own styling, apostrophe included; the host fallback gives "Lowes".
+  { match: 'lowes.com', name: "Lowe's" },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
   { match: 'vexpro.com', name: 'VEXpro' },
   { match: 'ctr-electronics.com', name: 'Cross the Road Electronics' },
@@ -767,6 +769,90 @@ function fromVexUrl(urlObj: URL): ExtractedProduct | null {
   }
 }
 
+// Lowe's sits behind Akamai Bot Manager and there is no server-side way in.
+// A plain fetch is answered 403; a full browser header set gets the behavioural
+// challenge interstitial ("Powered and protected by Akamai") rather than the
+// page; and Chromium, headless or headed, is answered "Access Denied" outright.
+// Delegating to vendord would achieve nothing, since it makes the same kind of
+// request. Their robots.txt also disallows /pd/*/*/pricing/*, so the price is
+// off-limits by their own policy and not merely unreachable -- the same
+// standing as McMaster. Don't add a scraping path for them.
+//
+// What the URL does carry is genuinely useful. /pd/{slug}/{itemNumber} holds
+// the item number Lowe's search and stores index by (their "Item #"), and a
+// slug that is the product title with every space turned into a hyphen.
+const LOWES_PRODUCT = /^\/pd\/([^/]+)\/(\d+)\/?$/i
+
+// Hardware is sized in fractions, and the slug flattens both "3/4" and "3.375"
+// to the same "3-4"/"3-375" shape -- so "1-2-in" has to be told apart from
+// "2-12-in" or the name comes out meaning something else entirely.
+//
+// A fraction is recoverable because of what hardware fractions look like: the
+// denominator is a power of two, and a fully reduced numerator over one is
+// always odd (2/4 would have been written 1/2). A leading zero settles it the
+// other way, since nothing is sized "0/944". Checked against the 7,855 product
+// URLs in their sitemap: 3/4-in, 1/8-in and 1/32-in come back as fractions,
+// while 3.375-in, 94.48-in, 0.944-in, 1.023-in and 3.5625-in stay decimal.
+const FRACTION_DENOMINATORS = new Set([2, 4, 8, 16, 32, 64])
+
+function isHardwareFraction(numerator: string, denominator: string): boolean {
+  if (denominator.startsWith('0')) return false
+  const n = Number(numerator)
+  const d = Number(denominator)
+  return FRACTION_DENOMINATORS.has(d) && n % 2 === 1 && n < d
+}
+
+function titleFromLowesSlug(slug: string): string {
+  const parts = slug.split('-')
+  const out: string[] = []
+  const isNumber = (value: string | undefined) => !!value && /^\d+$/.test(value)
+
+  for (let i = 0; i < parts.length; i++) {
+    const a = parts[i]!
+    const b = parts[i + 1]
+    const c = parts[i + 2]
+    // "1-1-2-in" is one and a half inches: a whole number, then a fraction.
+    if (isNumber(a) && isNumber(b) && isNumber(c) && isHardwareFraction(b!, c!)) {
+      out.push(`${a}-${b}/${c}`)
+      i += 2
+      continue
+    }
+    if (isNumber(a) && isNumber(b)) {
+      out.push(isHardwareFraction(a, b!) ? `${a}/${b}` : `${a}.${b}`)
+      i += 1
+      continue
+    }
+    out.push(a)
+  }
+
+  // Rejoin a unit to the measurement in front of it, and only there: an
+  // unanchored rule also rewrote ordinary words, turning "All in One" into
+  // "All-in One".
+  return out
+    .join(' ')
+    .replace(/(\d)\s+(in|ft|mm|cm|oz|lb)\b/gi, '$1-$2')
+    .trim()
+}
+
+function fromLowesUrl(urlObj: URL): ExtractedProduct | null {
+  const match = LOWES_PRODUCT.exec(urlObj.pathname)
+  if (!match) return null
+  const title = titleFromLowesSlug(match[1]!)
+  if (!title) return null
+
+  return {
+    title,
+    description: null,
+    price: null,
+    currency: 'USD',
+    // Lowe's own "Item #", which is what their search and their stores look up.
+    sku: match[2]!,
+    variantId: null,
+    variantTitle: null,
+    variants: []
+  }
+}
+
 const URL_ONLY_VENDORS: Array<{
   domain: string
   parse: (urlObj: URL) => ExtractedProduct | null
@@ -777,7 +863,8 @@ const URL_ONLY_VENDORS: Array<{
   // Canadian teams order from the .ca storefront; same URL shapes.
   { domain: 'digikey.ca', parse: fromDigiKeyUrl },
   { domain: 'studica.com', parse: fromStudicaUrl },
-  { domain: 'vexrobotics.com', parse: fromVexUrl }
+  { domain: 'vexrobotics.com', parse: fromVexUrl },
+  { domain: 'lowes.com', parse: fromLowesUrl }
 ]
 
 // ---- Amazon --------------------------------------------------------------
