@@ -234,7 +234,13 @@ function titleBesideSku(
 }
 
 function cleanName(value: unknown): string | null {
-  return cleanText(value, 300)
+  const text = cleanText(value, 300)
+  // Online Metals interpolate a missing field straight into their product
+  // name -- 'Legs: 1.5" x 1.5"null, Thickness: 0.125"' -- and it lands on the
+  // line item. Anchored to a lowercase `null` sitting directly against a
+  // closing inch mark, which is their bug's exact shape; a bare /\bnull\b/
+  // would eat the name of a Null Modem Cable.
+  return text?.replace(/(?<=")null\b/g, '') ?? null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -719,6 +725,56 @@ function variantsFromProductGroup(
     })
   }
   return variants
+}
+
+// An AggregateOffer may carry the individual offers it summarises, and where a
+// vendor fills those in they *are* the variants. Online Metals lists one per
+// cut length, each with the `?variant=` id its own URLs use, so this recovers
+// the picker the URL-only parser could only ever guess at from the query
+// string -- and the prices, which that parser had no way to know at all.
+//
+// Properties describing the shipment rather than the choice are dropped: a
+// variant labelled "12.0 / 0.44" would be offering the buyer a weight.
+const OFFER_PROPERTY_NOISE = /weight|shipping|ship\s/i
+
+function variantsFromAggregateOffer(
+  offers: unknown,
+  base: URL
+): ExtractedVariant[] {
+  if (!isRecord(offers)) return []
+  const nested = offers.offers
+  if (!Array.isArray(nested)) return []
+
+  const variants: ExtractedVariant[] = []
+  const seen = new Set<string>()
+  for (const offer of nested) {
+    if (!isRecord(offer)) continue
+    const sku = asString(offer.sku)
+    const id
+      = sku
+      ?? variantIdFromUrl(asString(offer.url), base)
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+
+    const labels: string[] = []
+    const props = offer.additionalProperty
+    for (const prop of Array.isArray(props) ? props : [props]) {
+      if (!isRecord(prop)) continue
+      const name = asString(prop.name) ?? ''
+      if (OFFER_PROPERTY_NOISE.test(name)) continue
+      const value = asString(prop.value)
+      if (value) labels.push(value)
+    }
+
+    variants.push({
+      id,
+      sku,
+      title: labels.join(' / ') || id,
+      price: parsePrice(offer.price)
+    })
+  }
+  // One offer is not a choice, just the price restated.
+  return variants.length > 1 ? variants : []
 }
 
 // A ProductGroup's offers link to the variant as ?id= (Shopify's own markup)
@@ -1607,9 +1663,22 @@ export async function extractPart(
         || groupVariants[0]
         || null
 
+      const aggregateVariants = variantsFromAggregateOffer(
+        resolveRef(node.offers, nodesById),
+        urlObj
+      )
+      // Honour ?variant= against the offer list too, so a deep link to a
+      // particular cut length prices as that length rather than the cheapest.
+      const requestedOffer
+        = urlObj.searchParams.get('variant')
+        ?? urlObj.searchParams.get('id')
+      const chosenOffer = requestedOffer
+        ? aggregateVariants.find(v => v.id === requestedOffer)
+        : undefined
+
       const own = priceFromOffers(resolveRef(node.offers, nodesById))
       // A group has no offers of its own; the chosen variant is the price.
-      const price = own.price ?? selected?.price ?? null
+      const price = chosenOffer?.price ?? own.price ?? selected?.price ?? null
       const currency = own.currency
 
       let variants: ExtractedVariant[]
@@ -1620,6 +1689,8 @@ export async function extractPart(
           = groupVariants.length > 1
           || groupVariants.some(variant => variant.title !== name)
         variants = hasChoice ? groupVariants : []
+      } else if (aggregateVariants.length > 0) {
+        variants = aggregateVariants
       } else if (isSailriteHost(hostname)) {
         // Sailrite prices per colour, length and width, and the page shows
         // only the base article. See server/utils/sailrite.ts -- one page
@@ -1672,7 +1743,7 @@ export async function extractPart(
           description: cleanText(node.description) ?? ogDescription(),
           price: supplement?.price ?? price,
           currency: currency ?? 'USD',
-          sku: sku ?? supplement?.sku ?? null,
+          sku: chosenOffer?.sku ?? sku ?? supplement?.sku ?? null,
           image: absoluteUrl(
             // schema.org allows a bare URL, an array, or an ImageObject.
             asString(

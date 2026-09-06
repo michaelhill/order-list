@@ -19,7 +19,12 @@ const VENDORD_ORIGIN = process.env.VENDORD_URL
 // Vendors that sit behind a bot challenge, so a direct fetch from the Worker
 // only ever returns an interstitial. These go to vendord first instead of
 // wasting a round trip on a request we know will be refused.
-const DELEGATED_HOSTS = ['onlinemetals.com']
+// Nothing is delegated as a *fetch* any more: Online Metals used to be here,
+// and is now rendered in a browser instead, which returns the page's own
+// JSON-LD -- name, sku, description, image and a price per cut length -- where
+// the scraper hop produced nothing usable. Kept because the mechanism is
+// sound and the next unreadable vendor may suit it.
+const DELEGATED_HOSTS: string[] = []
 
 export function shouldDelegateToScraper(hostname: string): boolean {
   return DELEGATED_HOSTS.some(domain => hostMatches(hostname, domain))
@@ -50,7 +55,8 @@ const BROWSER_RENDER_HOSTS: Array<{ domain: string, waitFor?: string }> = [
   { domain: 'powerwerx.com' },
   { domain: 'studica.com' },
   { domain: 'vexrobotics.com' },
-  { domain: 'bricklink.com', waitFor: '.item.table-row' }
+  { domain: 'bricklink.com', waitFor: '.item.table-row' },
+  { domain: 'onlinemetals.com' }
 ]
 
 export function shouldRenderInBrowser(hostname: string): boolean {
