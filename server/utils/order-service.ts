@@ -97,6 +97,7 @@ export interface OrderRecord {
     | "amazon"
     | "swyft"
     | "volusion"
+    | "curated"
     | null;
   // The vendor's storefront host, used to build a one-click cart link.
   vendorHostname: string | null;

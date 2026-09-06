@@ -148,6 +148,13 @@
       "when": 1788016710888,
       "tag": "0020_seed_robopromo_vendor",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1788016710889,
+      "tag": "0021_seed_sailrite_curated",
+      "breakpoints": true
     }
   ]
 }

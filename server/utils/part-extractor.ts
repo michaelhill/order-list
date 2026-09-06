@@ -1,5 +1,6 @@
 import { parseHTML } from 'linkedom'
 import type { DpoOptionGroup } from './wcp-dpo'
+import { fetchSailriteVariants, isSailriteHost } from './sailrite'
 
 // Self-contained product extractor: given a product URL, reach out to the site
 // and pull structured details. Tries, in order:
@@ -317,6 +318,41 @@ function collectProducts(node: unknown, out: Record<string, unknown>[]): void {
     = type === 'Product'
     || (Array.isArray(type) && type.includes('Product'))
   if (isProduct) out.push(node)
+}
+
+// schema.org lets a node point at another by reference rather than nesting it,
+// and Sailrite splits a product across four <script> blocks that way: the
+// Product carries `"offers": {"@id": "#offers"}` and `"image": {"@id":
+// "#primary-image"}`, with the Offer holding the price and the ImageObject the
+// URL in blocks of their own. Reading the Product alone therefore produced a
+// complete-looking part with no price at all -- the failure this resolves.
+function collectById(node: unknown, out: Map<string, Record<string, unknown>>): void {
+  if (Array.isArray(node)) {
+    for (const item of node) collectById(item, out)
+    return
+  }
+  if (!isRecord(node)) return
+  if ('@graph' in node) collectById(node['@graph'], out)
+  const id = node['@id']
+  if (typeof id === 'string' && id && !out.has(id)) out.set(id, node)
+}
+
+/**
+ * Swap a bare `{"@id": "#x"}` for the node it names. Fields written inline win
+ * over the referenced ones, so a node that carries both its own data and an
+ * id keeps its data.
+ */
+function resolveRef(
+  value: unknown,
+  byId: Map<string, Record<string, unknown>>
+): unknown {
+  if (Array.isArray(value)) return value.map(item => resolveRef(item, byId))
+  if (!isRecord(value)) return value
+  const id = value['@id']
+  if (typeof id !== 'string') return value
+  const target = byId.get(id)
+  if (!target || target === value) return value
+  return { ...target, ...value }
 }
 
 function priceFromOffers(offers: unknown): {
@@ -771,13 +807,18 @@ export async function extractPart(
 
     // 2. JSON-LD Product.
     const products: Record<string, unknown>[] = []
+    // Indexed across every block, not just the one the Product came from --
+    // the node a reference names is routinely in a different <script>.
+    const nodesById = new Map<string, Record<string, unknown>>()
     for (const script of Array.from(
       document.querySelectorAll('script[type="application/ld+json"]')
     )) {
       const raw = script.textContent
       if (!raw) continue
       try {
-        collectProducts(JSON.parse(raw), products)
+        const parsed = JSON.parse(raw)
+        collectProducts(parsed, products)
+        collectById(parsed, nodesById)
       } catch {
         // Ignore malformed JSON-LD blocks.
       }
@@ -785,7 +826,16 @@ export async function extractPart(
     const node = products[0]
     const name = node ? asString(node.name) : null
     if (node && name) {
-      const { price, currency } = priceFromOffers(node.offers)
+      const { price, currency } = priceFromOffers(
+        resolveRef(node.offers, nodesById)
+      )
+      const imageNode = resolveRef(node.image, nodesById)
+      // Sailrite prices per colour, length and width, and the page shows only
+      // the base article. See server/utils/sailrite.ts -- one page fetch per
+      // combination, run together, so the picker can carry real prices.
+      const jsonLdVariants = isSailriteHost(hostname)
+        ? await fetchSailriteVariants(urlObj, html, USER_AGENT, signal)
+        : []
       return {
         url,
         hostname,
@@ -804,16 +854,16 @@ export async function extractPart(
           image: absoluteUrl(
             // schema.org allows a bare URL, an array, or an ImageObject.
             asString(
-              Array.isArray(node.image) ? node.image[0] : node.image
+              Array.isArray(imageNode) ? imageNode[0] : imageNode
             ) ?? asString(
-              (node.image as Record<string, unknown> | undefined)?.url
+              (imageNode as Record<string, unknown> | undefined)?.url
             ),
             urlObj
           ),
           // Neither fallback source exposes platform variant ids.
           variantId: null,
           variantTitle: null,
-          variants: []
+          variants: jsonLdVariants
         }
       }
     }

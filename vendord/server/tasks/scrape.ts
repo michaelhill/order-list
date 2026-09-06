@@ -9,6 +9,7 @@ import {
 } from '../utils/bigcommerce'
 import { fetchSwyftProducts } from '../utils/swyft'
 import { fetchVolusionProducts } from '../utils/volusion'
+import { curatedUrls, productsFromUrls } from '../utils/product-urls'
 
 export default defineTask({
   meta: {
@@ -188,6 +189,46 @@ export default defineTask({
           } catch (error) {
             console.error(
               `Failed to scrape Volusion store ${vendor.hostname}:`,
+              error
+            )
+          }
+        } else if (vendor.type === 'curated') {
+          try {
+            // Not the whole storefront -- only the products this vendor's
+            // config names. Sailrite sells thousands of items an FRC team will
+            // never buy; the handful they do is worth indexing and the rest is
+            // noise in the results.
+            const products = await productsFromUrls(
+              curatedUrls(vendor.config, vendor.hostname)
+            )
+
+            for (const unified of products) {
+              await db
+                .insert(productCache)
+                .values({
+                  vendorId: vendor.id,
+                  id: `${vendor.hostname}:${unified.handle}`,
+                  productJson: JSON.stringify(unified),
+                  updatedAt: new Date()
+                })
+                .onConflictDoUpdate({
+                  target: [productCache.id],
+                  set: {
+                    // See the note in the shopify branch above.
+                    vendorId: vendor.id,
+                    productJson: JSON.stringify(unified),
+                    updatedAt: new Date()
+                  }
+                })
+            }
+
+            console.log(
+              `Scraped ${products.length} curated products from `
+              + `${vendor.hostname}`
+            )
+          } catch (error) {
+            console.error(
+              `Failed to scrape curated vendor ${vendor.hostname}:`,
               error
             )
           }
