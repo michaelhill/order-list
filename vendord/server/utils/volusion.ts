@@ -74,6 +74,7 @@ export async function fetchVolusionProducts(
         description: product.description ?? 'no description'
       }
       if (product.price != null) unified.price = product.price
+      if (product.image) unified.image = product.image
       if (sku) {
         // sync reads `sku || id` off this field for the searchable SKU list.
         unified.variants = [{ id: sku, title: 'Default', price: product.price ?? undefined }]
