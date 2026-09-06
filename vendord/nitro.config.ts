@@ -9,10 +9,10 @@ export default defineNitroConfig({
     tasks: true
   },
   scheduledTasks: {
-    // Both are midnight in New York -- 04:00 UTC under EDT, 05:00 under EST --
-    // and the `nightly` task drops whichever one isn't. See the note there for
-    // why this isn't done by setting TZ on the process.
-    '0 4 * * *': 'nightly',
-    '0 5 * * *': 'nightly'
+    // Hourly, because croner reads the *host's* local time and this expression
+    // cannot name a zone. `nightly` runs the scrape only on the wake-up that
+    // lands at midnight in New York and returns immediately on the other 23.
+    // See the note there.
+    '0 * * * *': 'nightly'
   }
 })

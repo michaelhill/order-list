@@ -61,14 +61,14 @@ const domain = computed(() => {
   const last = steps.value.at(-1);
   if (!first || !last) return { t0: 0, t1: 1, p0: 0, p1: 1 };
 
-  let t0 = first.from;
-  let t1 = last.to;
-  // A product tracked for a single day has no width at all. Give it one so the
-  // flat line is visible rather than collapsing to a point on the axis.
-  if (t1 - t0 < DAY) {
-    t0 -= DAY / 2;
-    t1 += DAY / 2;
-  }
+  const t0 = first.from;
+  // The observed window is exactly what gets drawn, however short. Padding it
+  // out to a nominal day used to make a genuine few-hour observation render as
+  // a stub in the middle of empty chart; spanning the plot with the axis
+  // labelled by the real dates says the same thing without the dead space.
+  // Only a truly zero-width window needs a guard, and it cannot reach here —
+  // the modal shows a single instantaneous observation as text instead.
+  const t1 = last.to > t0 ? last.to : t0 + DAY;
 
   const prices = steps.value.map(step => step.price);
   let p0 = Math.min(...prices);

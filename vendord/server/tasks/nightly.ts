@@ -1,20 +1,24 @@
 import { defineTask, runTask } from "nitropack/runtime";
 
-// Midnight Eastern, without moving the process off UTC.
+// Midnight Eastern, without depending on what timezone the host is in.
 //
-// Nitro schedules with croner and gives it nothing but the expression --
+// Nitro schedules with croner and hands it nothing but the expression --
 // `new Cron(expr, handler)` in nitropack/dist/runtime/internal/task.mjs -- so
-// there is no timezone to pass and croner reads local time. The obvious fix,
-// setting TZ=America/New_York on the vendord process, is the wrong one here:
-// every timestamp column in this schema is `timestamp without time zone`, and
+// there is no zone to pass and croner reads the host's local time. The obvious
+// fix, TZ=America/New_York on the vendord process, is the wrong one here: every
+// timestamp column in this schema is `timestamp without time zone`, and
 // node-postgres serializes a Date using the process's local offset, so vendord
-// would start writing timestamps four or five hours off from what the app
-// writes and reads. Nothing would error; the data would just quietly disagree.
+// would start writing timestamps hours off from what the app writes and reads.
+// Nothing would error; the data would just quietly disagree.
 //
-// So the schedule fires twice, at 04:00 and 05:00 UTC -- midnight Eastern under
-// EDT and under EST respectively -- and this task drops whichever of the two is
-// not actually midnight there. That tracks the DST transitions on its own,
-// because Intl does.
+// The first attempt fired at 04:00 and 05:00 UTC -- midnight Eastern under EDT
+// and EST -- and dropped whichever wasn't midnight. That was correct only
+// while the host stayed on UTC, an assumption nothing enforced and nothing
+// would have reported breaking: on a workstation already set to Eastern those
+// same expressions mean 4am and 5am local, and the task simply never ran at
+// midnight. So wake hourly and decide here. 23 no-op wake-ups a day cost one
+// Intl call each, and the schedule is now correct on any host, in any zone,
+// across both DST transitions.
 function easternHour(now: Date): number {
   const hour = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
@@ -28,17 +32,18 @@ function easternHour(now: Date): number {
 export default defineTask({
   meta: {
     name: "nightly",
-    description: "Run the scrape at midnight Eastern, whatever UTC offset",
+    description: "Run the scrape at midnight Eastern, whatever the host clock",
   },
   async run() {
     const hour = easternHour(new Date());
     if (hour !== 0) {
-      // The other half of the pair. Not an error, and not worth a log line
-      // every night, but say something so a silent night is distinguishable
-      // from a scheduler that never fired.
-      console.log(`Skipping nightly scrape: ${hour}:00 in New York, not 00:00`);
+      // Logged rather than silent so that "the scheduler is alive" stays
+      // answerable from the log alone -- a quiet night and a scheduler that
+      // never started look identical otherwise.
+      console.log(`nightly: ${hour}:00 in New York, not midnight; skipping`);
       return { result: { skipped: true, easternHour: hour } };
     }
+    console.log("nightly: midnight in New York, starting scrape");
     const { result } = await runTask("scrape");
     return { result };
   },
