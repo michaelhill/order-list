@@ -236,11 +236,17 @@ function titleBesideSku(
 function cleanName(value: unknown): string | null {
   const text = cleanText(value, 300)
   // Online Metals interpolate a missing field straight into their product
-  // name -- 'Legs: 1.5" x 1.5"null, Thickness: 0.125"' -- and it lands on the
-  // line item. Anchored to a lowercase `null` sitting directly against a
-  // closing inch mark, which is their bug's exact shape; a bare /\bnull\b/
-  // would eat the name of a Null Modem Cable.
-  return text?.replace(/(?<=")null\b/g, '') ?? null
+  // name, and it lands on the line item: 'Legs: 1.5" x 1.5"null, Thickness:
+  // 0.125"' and 'Wire Type: Unserved Litz Wirenull, Wire Size: 26 AWGnull'.
+  // A first pass anchored this to a closing inch mark, which only covered the
+  // first of those -- the value it follows can be any character at all.
+  //
+  // What is constant is the shape: a lowercase `null` welded onto the end of a
+  // value, with nothing between, and the field's separator immediately after.
+  // Requiring both a non-space before and a comma-or-end after is what spares
+  // the name of a Null Modem Cable, where `Null` is a word with a space on
+  // each side.
+  return text?.replace(/(?<=\S)null(?=,|$)/g, '') ?? null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -917,7 +923,9 @@ function getMeta(document: ParsedDoc, selectors: string[]): string | null {
 // own to be worth filling in:
 //   /en/buy/{category}/{slug}/pid/{pid}          the product
 //   ?variant={pid}_{lengthInInches}_{n}          a specific cut length
-const ONLINE_METALS_PRODUCT = /\/buy\/[^/]+\/([^/]+)\/pid\/(\d+)/i
+// Their marketplace items carry a prefixed id -- /pid/mp-00065192 -- alongside
+// the plain numeric ones, so this cannot require digits.
+const ONLINE_METALS_PRODUCT = /\/buy\/[^/]+\/([^/]+)\/pid\/([\w-]+)/i
 
 function titleFromSlug(slug: string): string {
   return slug
@@ -1429,6 +1437,11 @@ function fromHarborFreightUrl(urlObj: URL): ExtractedProduct | null {
 const URL_ONLY_VENDORS: Array<{
   domain: string
   parse: (urlObj: URL) => ExtractedProduct | null
+  // Whether refusing a URL means "this is not a product page" rather than
+  // merely "this parser cannot read it". Only true where the URL grammar
+  // genuinely tells the two apart, which is a much stronger claim than being
+  // able to parse the usual shape -- see the note at the check itself.
+  gatesProducts?: boolean
 }> = [
   { domain: 'onlinemetals.com', parse: fromOnlineMetalsUrl },
   { domain: 'mcmaster.com', parse: fromMcMasterUrl },
@@ -1436,7 +1449,7 @@ const URL_ONLY_VENDORS: Array<{
   // Canadian teams order from the .ca storefront; same URL shapes.
   { domain: 'digikey.ca', parse: fromDigiKeyUrl },
   { domain: 'studica.com', parse: fromStudicaUrl },
-  { domain: 'vexrobotics.com', parse: fromVexUrl },
+  { domain: 'vexrobotics.com', parse: fromVexUrl, gatesProducts: true },
   { domain: 'lowes.com', parse: fromLowesUrl },
   { domain: 'homedepot.com', parse: fromHomeDepotUrl },
   // No FRC_VENDORS entry needed: the host fallback already yields "Menards".
@@ -1552,18 +1565,31 @@ export async function extractPart(
   const urlOnly = URL_ONLY_VENDORS.find(v => hostMatches(hostname, v.domain))
   const fromUrl = urlOnly?.parse(urlObj) ?? null
 
-  // A vendor with a URL parser has told us what its product URLs look like,
-  // and that stays authoritative even once the page can be read. VEX is why:
-  // their slug pages (/wheels.html, /gears.html) carry the same .html suffix
-  // as a part number and are marked up as a Product -- "Wheels", $9.99, with
-  // nothing orderable behind it. Rendering the page and trusting its JSON-LD
-  // turned one into a line item, which is the trap the NNN-NNNN.html rule was
-  // written to avoid in the first place.
-  if (urlOnly && !fromUrl) {
+  // Where a vendor's URL grammar genuinely distinguishes a product from a
+  // category, that stays authoritative even once the page can be read. VEX is
+  // the case: their slug pages (/wheels.html, /gears.html) carry the same
+  // .html suffix as a part number and are marked up as a Product -- "Wheels",
+  // $9.99, with nothing orderable behind it -- so rendering one and trusting
+  // its JSON-LD turned a category into a line item.
+  //
+  // It is opt-in because the general version of this rule was wrong. Most of
+  // these parsers exist to salvage a name from a URL when the page cannot be
+  // read, not to rule on what a product is, and their grammars are only as
+  // complete as the URLs I happened to see: Online Metals' marketplace ids
+  // (/pid/mp-00065192) did not match a rule written for numeric ones, and a
+  // blanket gate turned an unanticipated id into "not a product" for a page
+  // sitting there perfectly readable.
+  if (urlOnly?.gatesProducts && !fromUrl) {
     return { url, hostname, vendorName, source: 'none', product: null }
   }
   if (urlOnly && !prefetchedHtml) {
-    return { url, hostname, vendorName, source: 'url', product: fromUrl }
+    return {
+      url,
+      hostname,
+      vendorName,
+      source: fromUrl ? 'url' : 'none',
+      product: fromUrl
+    }
   }
 
   // 1. Shopify JSON — richest data, so try it first for any /products/ URL.
