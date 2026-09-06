@@ -97,6 +97,9 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   // brand is what belongs on a line item. Matched on the apex so the other
   // regional stores (eu., uk.) resolve the same way.
   { match: 'bambulab.com', name: 'Bambu Lab' },
+  // Nothing on their pages names the store -- no og:site_name, no brand in the
+  // JSON-LD -- so the host fallback produced the runic "Rockwestcomposites".
+  { match: 'rockwestcomposites.com', name: 'Rock West Composites' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },
   { match: 'vexpro.com', name: 'VEXpro' },
   { match: 'ctr-electronics.com', name: 'Cross the Road Electronics' },
@@ -314,6 +317,15 @@ async function tryShopify(
 // carrying both still prefers the plain Product. Neither recursion descends
 // into `hasVariant`, so a group's choices never surface as products of their
 // own.
+//
+// `mainEntity` is descended into because a page is entitled to describe itself
+// as a WebPage and hang the actual subject underneath -- schema.org's own
+// wording for the property is "the primary entity described in this page", so a
+// Product found there is the product, not an incidental mention. Rock West
+// Composites (Salesforce B2C Commerce) does exactly this, and reading only the
+// top-level type found nothing: the OpenGraph fallback took over and every part
+// came through with a title, no price, no SKU and no image, while all four sat
+// in the markup one level down.
 function collectProducts(
   node: unknown,
   out: Record<string, unknown>[],
@@ -325,10 +337,50 @@ function collectProducts(
   }
   if (!isRecord(node)) return
   if ('@graph' in node) collectProducts(node['@graph'], out, groups)
+  if ('mainEntity' in node) collectProducts(node.mainEntity, out, groups)
   const type = node['@type']
   const types = Array.isArray(type) ? type : [type]
   if (types.includes('Product')) out.push(node)
   else if (types.includes('ProductGroup')) groups.push(node)
+}
+
+// Rock West publishes quantity discounts as a tier table in the page markup and
+// not in its JSON-LD, which carries only the single-unit price. A team buying
+// six tubes pays the six-up price, so reading the table is the difference
+// between the figure shown and the figure charged. No extra request: the tiers
+// are in the HTML already fetched.
+//
+// The markup is Salesforce B2C Commerce's default tiered-pricing template, so
+// this would likely hold for other stores on that platform -- but only Rock
+// West is confirmed, so only Rock West is asked.
+const ROCK_WEST_HOSTS = ['rockwestcomposites.com']
+
+function isRockWestHost(hostname: string): boolean {
+  return ROCK_WEST_HOSTS.some(domain => hostMatches(hostname, domain))
+}
+
+const TIER_SPAN = /<span[^>]*class="[^"]*\btier-quantity\b[^"]*"[^>]*>/gi
+
+function attr(tag: string, name: string): string | null {
+  const match = new RegExp(`${name}="([^"]*)"`, 'i').exec(tag)
+  return match ? match[1]! : null
+}
+
+function rockWestPriceBreaks(html: string): PriceBreak[] {
+  const breaks: PriceBreak[] = []
+  for (const [tag] of html.matchAll(TIER_SPAN)) {
+    // Attributes are read by name rather than by position -- a template is
+    // free to reorder them, and a regex that assumed the order would fail
+    // silently by finding nothing.
+    const quantity = Number(attr(tag, 'data-quantity'))
+    const unitPrice = Number(attr(tag, 'data-price'))
+    if (!Number.isFinite(quantity) || !Number.isFinite(unitPrice)) continue
+    if (quantity < 1 || unitPrice <= 0) continue
+    breaks.push({ quantity: Math.round(quantity), unitPrice })
+  }
+  // A single tier is not a discount schedule, just the ordinary price restated.
+  if (breaks.length < 2) return []
+  return breaks.sort((a, b) => a.quantity - b.quantity)
 }
 
 // Shopify's newer storefronts describe an options product as a schema.org
@@ -399,6 +451,7 @@ function collectById(node: unknown, out: Map<string, Record<string, unknown>>): 
   }
   if (!isRecord(node)) return
   if ('@graph' in node) collectById(node['@graph'], out)
+  if ('mainEntity' in node) collectById(node.mainEntity, out)
   const id = node['@id']
   if (typeof id === 'string' && id && !out.has(id)) out.set(id, node)
 }
@@ -934,6 +987,9 @@ export async function extractPart(
       }
 
       const imageNode = resolveRef(node.image, nodesById)
+      const priceBreaks = isRockWestHost(hostname)
+        ? rockWestPriceBreaks(html)
+        : []
       return {
         url,
         hostname,
@@ -963,7 +1019,8 @@ export async function extractPart(
           variantId: selected?.id || null,
           variantTitle:
             selected && selected.title !== name ? selected.title : null,
-          variants
+          variants,
+          ...(priceBreaks.length > 0 ? { priceBreaks } : {})
         }
       }
     }
