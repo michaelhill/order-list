@@ -155,6 +155,13 @@
       "when": 1788016710889,
       "tag": "0021_seed_sailrite_curated",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1788664796210,
+      "tag": "0022_product_price_history",
+      "breakpoints": true
     }
   ]
 }

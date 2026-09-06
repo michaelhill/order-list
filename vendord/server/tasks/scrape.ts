@@ -241,6 +241,19 @@ export default defineTask({
     }
     const { result } = await runTask('meilisearch:sync', { payload })
 
-    return { result }
+    // Record after the cache is filled, so every scrape lands a price point --
+    // the nightly one, a manual /scrape, and the one a deploy fires when a
+    // migration seeds a vendor. A product's history therefore starts the moment
+    // it first appears rather than waiting for the next midnight.
+    let prices
+    try {
+      prices = (await runTask('prices:record', { payload })).result
+    } catch (error) {
+      // The catalogue and the index are already updated by this point; losing
+      // one night of price points is not worth failing the scrape over.
+      console.error('Failed to record prices:', error)
+    }
+
+    return { result, prices }
   }
 })

@@ -233,3 +233,32 @@ jobs:
           curl -fsS -m 10 -H "Authorization: Bearer $key" \
             http://127.0.0.1:7700/indexes/products/stats || true
           REMOTE
+
+      # A scrape records prices on its way out, so this only has to cover the
+      # case the step above skipped: an index that was already full, where
+      # nothing would then be recorded until midnight Eastern. Without it the
+      # feature ships and every product reads "no price history yet" for up to
+      # a day, which looks broken rather than new. Reads product_cache and
+      # writes one row per product -- no network, under a second.
+      - name: Seed price history if empty
+        continue-on-error: true
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "$DEPLOY_USER@$DEPLOY_HOST" "cd $APP_DIR && bash -s" <<'REMOTE'
+          set -uo pipefail
+          rows=$(docker exec parts-db-1 psql -U postgres -t -A -c \
+            "select count(*) from product_price_history" 2>/dev/null || echo '')
+          if [ -z "$rows" ]; then
+            echo "could not read product_price_history; skipping"
+            exit 0
+          fi
+          if [ "$rows" -gt 0 ] 2>/dev/null; then
+            echo "price history already holds $rows rows; nightly run will extend it"
+            exit 0
+          fi
+          echo "recording a baseline price for every cached product"
+          curl -fsS -m 300 http://127.0.0.1:3434/record-prices || {
+            echo "price recording failed; run 'curl localhost:3434/record-prices' on the droplet" >&2
+            exit 1
+          }
+          echo
+          REMOTE
