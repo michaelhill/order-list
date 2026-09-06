@@ -51,20 +51,37 @@ export function shouldDelegateToScraper(hostname: string): boolean {
 // clears: a single-page storefront answers with a shell and fetches the
 // product over XHR afterwards, so returning at that point would hand back an
 // empty page. Only BrickLink needs it; the rest are server-rendered.
-const BROWSER_RENDER_HOSTS: Array<{ domain: string, waitFor?: string }> = [
-  { domain: 'powerwerx.com' },
+//
+// `blockScripts` drops the vendor's own JavaScript, which is most of a render's
+// cost where the product data is already in the server-rendered HTML. Verified
+// per host by extracting with and without and comparing the result, not
+// assumed: Online Metals, Powerwerx and VEX come back identical -- same price,
+// same variant counts -- at a third to a fifth of the time. BrickLink does not
+// and must not have it: their product arrives over XHR after the shell, so
+// without scripts the render yields nothing at all.
+//
+// Studica is unset because it has never been verified end to end at all; there
+// is no product URL on file for it.
+const BROWSER_RENDER_HOSTS: Array<{
+  domain: string
+  waitFor?: string
+  blockScripts?: boolean
+}> = [
+  { domain: 'powerwerx.com', blockScripts: true },
   { domain: 'studica.com' },
-  { domain: 'vexrobotics.com' },
+  { domain: 'vexrobotics.com', blockScripts: true },
   { domain: 'bricklink.com', waitFor: '.item.table-row' },
-  { domain: 'onlinemetals.com' }
+  { domain: 'onlinemetals.com', blockScripts: true }
 ]
 
 export function shouldRenderInBrowser(hostname: string): boolean {
   return BROWSER_RENDER_HOSTS.some(v => hostMatches(hostname, v.domain))
 }
 
-function renderWaitFor(hostname: string): string | undefined {
-  return BROWSER_RENDER_HOSTS.find(v => hostMatches(hostname, v.domain))?.waitFor
+function renderOptionsFor(
+  hostname: string
+): { waitFor?: string, blockScripts?: boolean } {
+  return BROWSER_RENDER_HOSTS.find(v => hostMatches(hostname, v.domain)) ?? {}
 }
 
 export interface RenderedPage {
@@ -83,8 +100,9 @@ export async function fetchRenderedPage(
 ): Promise<RenderedPage | null> {
   const target = new URL('/render', VENDORD_ORIGIN)
   target.searchParams.set('url', url)
-  const waitFor = renderWaitFor(new URL(url).hostname)
+  const { waitFor, blockScripts } = renderOptionsFor(new URL(url).hostname)
   if (waitFor) target.searchParams.set('waitFor', waitFor)
+  if (blockScripts) target.searchParams.set('blockScripts', '1')
 
   try {
     const response = await fetch(target, {

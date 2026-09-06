@@ -45,7 +45,10 @@ export default eventHandler(async (event) => {
 
   const startedAt = Date.now();
   try {
-    const result = await renderPage(parsed.toString(), waitFor);
+    const result = await renderPage(parsed.toString(), {
+      waitForSelector: waitFor,
+      blockScripts: query.blockScripts === "1"
+    });
     console.log(
       `Rendered ${parsed.hostname} in ${Date.now() - startedAt}ms`
       + ` (${result.launched ? "cold launch" : "warm browser"}): `

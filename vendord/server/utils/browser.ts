@@ -53,11 +53,22 @@ const LAUNCH_ARGS = [
   "--no-first-run"
 ];
 
-// Subresources that never affect what gets read out of the DOM. Scripts, XHR
-// and fetch are emphatically not here: the challenges are scripts, and
-// BrickLink's product arrives over XHR after the page shell. Blocking an image
-// does not remove its `src` from the markup, so image URLs still extract.
+// Subresources that never affect what gets read out of the DOM. Blocking an
+// image does not remove its `src` from the markup, so image URLs still
+// extract.
 const BLOCKED_RESOURCES = new Set(["image", "media", "font", "stylesheet"]);
+
+// A vendor whose product data is in the server-rendered HTML does not need its
+// own JavaScript run at all, and running it is most of the cost: measured on
+// the droplet, Online Metals went from 3642ms to 730ms once its scripts were
+// dropped, with an identical extraction. Opt-in per host, because it is only
+// true where the markup is server-rendered -- BrickLink builds its product
+// from XHR after the shell and returns nothing without scripts.
+const SCRIPTED_RESOURCES = new Set(["script", "xhr", "fetch"]);
+
+// ...with the exception of the bot walls themselves, which *are* scripts. A
+// challenge has to be able to run even when the vendor's own code is dropped.
+const CHALLENGE_INFRA = /cdn-cgi|challenge|awswaf|incapsula|_Incapsula|perimeterx/i;
 
 // Cloudflare's managed-challenge interstitial, Imperva's, and AWS WAF's --
 // the last of which announces itself only through the globals its script sets,
@@ -153,9 +164,32 @@ async function contentOrNull(page: Page): Promise<string | null> {
   }
 }
 
+export interface RenderOptions {
+  waitForSelector?: string
+  // Drop the vendor's own scripts. Only for hosts whose data is server-
+  // rendered; see SCRIPTED_RESOURCES.
+  blockScripts?: boolean
+}
+
 export async function renderPage(
   url: string,
-  waitForSelector?: string
+  options: RenderOptions = {}
+): Promise<RenderResult> {
+  const first = await renderOnce(url, options);
+  // A challenge that appeared while the vendor's scripts were dropped may not
+  // have been able to solve itself. That case is rare -- these hosts serve a
+  // browser without challenging it most of the time -- so rather than give up
+  // the speed for everyone, notice it and pay for one honest retry.
+  if (options.blockScripts && isChallenge(first.html)) {
+    console.log("Challenged with scripts blocked; retrying with them allowed");
+    return renderOnce(url, { ...options, blockScripts: false });
+  }
+  return first;
+}
+
+async function renderOnce(
+  url: string,
+  { waitForSelector, blockScripts }: RenderOptions
 ): Promise<RenderResult> {
   return serialize(async () => {
     // A fresh context per render, so one vendor's cookies and storage never
@@ -167,13 +201,29 @@ export async function renderPage(
       const acquired = await getBrowser();
       launched = acquired.launched;
       context = await acquired.browser.newContext({
-        viewport: { width: 1280, height: 900 }
+        viewport: { width: 1280, height: 900 },
+        // Pinned so a vendor that localises renders the same page every time.
+        // Note this does *not* settle currency: BrickLink converts a seller's
+        // price into the currency it infers from the client's IP, not its
+        // locale -- the droplet's New York address gets US dollars while a
+        // developer's machine may not. The extractor handles a missing dollar
+        // figure rather than relying on this.
+        locale: "en-US",
+        timezoneId: "America/New_York"
       });
       const page = await context.newPage();
       await page.route("**/*", (route) => {
-        return BLOCKED_RESOURCES.has(route.request().resourceType())
-          ? route.abort()
-          : route.continue();
+        const request = route.request();
+        const type = request.resourceType();
+        if (BLOCKED_RESOURCES.has(type)) return route.abort();
+        if (
+          blockScripts
+          && SCRIPTED_RESOURCES.has(type)
+          && !CHALLENGE_INFRA.test(request.url())
+        ) {
+          return route.abort();
+        }
+        return route.continue();
       });
 
       const response = await page.goto(url, {
