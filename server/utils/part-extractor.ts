@@ -107,6 +107,8 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   // which is the manufacturer rather than the store -- a roof bracket came
   // through as "Qual-Craft".
   { match: 'acehardware.com', name: 'Ace Hardware' },
+  // Two words, and the host fallback gives "Boltdepot".
+  { match: 'boltdepot.com', name: 'Bolt Depot' },
   // Their own styling carries the article; the host fallback gives "Homedepot".
   { match: 'homedepot.com', name: 'The Home Depot' },
   { match: 'vexrobotics.com', name: 'VEX Robotics' },

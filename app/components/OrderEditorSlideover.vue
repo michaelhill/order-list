@@ -617,6 +617,17 @@ watchEffect((onCleanup) => {
         return
       }
 
+      // The page could not be read, but the hostname still names the store.
+      // Keep that before trying the scraper, because for a vendor behind a bot
+      // wall it is the only thing either lookup will produce: Bolt Depot's
+      // Cloudflare challenge defeats the extractor, and vendord answers "Product
+      // not found on vendor site", so the throw below used to leave the form
+      // completely empty and the buyer retyped a vendor we had already named.
+      // A scraper that does succeed overwrites this with its own vendor.
+      if (extracted.vendorName) {
+        formState.vendorId = extracted.vendorName
+      }
+
       // Fallback: the external scraper service (BigCommerce/Amazon/etc.).
       const data = await $fetch<VendorProductResponse>('/api/vendors', {
         query: { url: externalUrl },
