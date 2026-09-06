@@ -1406,15 +1406,20 @@ export async function extractPart(
   // browser could not produce one. The guess is still there at the end of this
   // function for that case.
   const urlOnly = URL_ONLY_VENDORS.find(v => hostMatches(hostname, v.domain))
+  const fromUrl = urlOnly?.parse(urlObj) ?? null
+
+  // A vendor with a URL parser has told us what its product URLs look like,
+  // and that stays authoritative even once the page can be read. VEX is why:
+  // their slug pages (/wheels.html, /gears.html) carry the same .html suffix
+  // as a part number and are marked up as a Product -- "Wheels", $9.99, with
+  // nothing orderable behind it. Rendering the page and trusting its JSON-LD
+  // turned one into a line item, which is the trap the NNN-NNNN.html rule was
+  // written to avoid in the first place.
+  if (urlOnly && !fromUrl) {
+    return { url, hostname, vendorName, source: 'none', product: null }
+  }
   if (urlOnly && !prefetchedHtml) {
-    const product = urlOnly.parse(urlObj)
-    return {
-      url,
-      hostname,
-      vendorName,
-      source: product ? 'url' : 'none',
-      product
-    }
+    return { url, hostname, vendorName, source: 'url', product: fromUrl }
   }
 
   // 1. Shopify JSON — richest data, so try it first for any /products/ URL.
@@ -1662,7 +1667,6 @@ export async function extractPart(
 
   // A rendered page that turned out to hold nothing readable still leaves the
   // URL, for a vendor that has a parser for it.
-  const fromUrl = urlOnly?.parse(urlObj) ?? null
   if (fromUrl) {
     return { url, hostname, vendorName, source: 'url', product: fromUrl }
   }
