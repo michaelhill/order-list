@@ -46,6 +46,16 @@ import {
   rockWestCartUrl,
   rockWestSku
 } from './rock-west'
+import {
+  SEATTLE_FABRICS_ENCTYPE,
+  SEATTLE_FABRICS_HOSTS,
+  seattleFabricsAddFields,
+  seattleFabricsAddUrl,
+  seattleFabricsCartUrl,
+  seattleFabricsItemId,
+  seattleFabricsOptions
+} from './seattle-fabrics'
+import { fetchRenderedPage } from './vendord'
 import { SITE_HOST } from './site'
 import type { OrderRecord, OrderItemRecord } from './order-service'
 
@@ -102,6 +112,10 @@ export interface CartAddLink {
   // Set when the vendor's add endpoint only answers to a POST, in which case
   // the UI submits a form to `url` carrying these fields.
   postFields?: Record<string, string>
+  // Only when the endpoint refuses the browser default of
+  // application/x-www-form-urlencoded. Seattle Fabrics does: sent urlencoded
+  // it accepts the request and adds nothing, which looks like success.
+  enctype?: string
 }
 
 export interface CartLinkResult {
@@ -155,6 +169,7 @@ type CartPlatform =
   | 'bigcommerce'
   | 'playing-with-fusion'
   | 'rock-west'
+  | 'seattle-fabrics'
 
 // FastAdd takes DigiKey part numbers and quantities straight off a URL:
 // https://forum.digikey.com/t/digikey-fastadd-.../61356
@@ -189,6 +204,9 @@ function detectPlatform(
   }
   if (ROCK_WEST_HOSTS.some(domain => hostMatches(host, domain))) {
     return 'rock-west'
+  }
+  if (SEATTLE_FABRICS_HOSTS.some(domain => hostMatches(host, domain))) {
+    return 'seattle-fabrics'
   }
   // Before the Shopify check: DigiKey product URLs also contain /products/,
   // so the path heuristic below would otherwise claim them.
@@ -530,6 +548,94 @@ async function buildRockWestCart(
   }
 }
 
+// Seattle Fabrics adds one part per POST, like Rock West -- but the POST has
+// to name the option, and neither the option id nor the field it goes in can
+// be derived from anything the order stores. The order carries the SKU
+// ("FC5-COYOTE TAN"); the add wants `option-di_62-52=629`. So each distinct
+// product is rendered once and its options read, and the SKU matched back.
+//
+// A part whose option cannot be established is excluded rather than posted
+// without one. `add_cart.asp` answers a bare add for an optioned product by
+// bouncing to the product page having added nothing, so a guess here would
+// tick a row off in the UI while the cart stayed empty -- the same reasoning
+// that makes rock-west.ts refuse to post a master id.
+//
+// That includes a page that could not be rendered at all: without it there is
+// no way to tell a product that needs no option from one that does.
+async function buildSeattleFabricsCart(
+  order: OrderRecord,
+  host: string,
+  empty: Omit<CartLinkResult, 'reason'>,
+  signal?: AbortSignal
+): Promise<CartLinkResult> {
+  const urls = [...new Set(
+    order.items.map(item => item.externalUrl).filter((u): u is string => !!u)
+  )]
+  const pages = new Map<string, string>()
+  for (let i = 0; i < urls.length; i += LOOKUP_BATCH_SIZE) {
+    const batch = urls.slice(i, i + LOOKUP_BATCH_SIZE)
+    const settled = await Promise.allSettled(
+      batch.map(url => fetchRenderedPage(url, signal))
+    )
+    settled.forEach((outcome, index) => {
+      if (outcome.status === 'fulfilled' && outcome.value?.html) {
+        pages.set(batch[index]!, outcome.value.html)
+      }
+    })
+  }
+
+  const addLinks: CartAddLink[] = []
+  const included: CartLinkItem[] = []
+  const excluded: CartLinkItem[] = []
+
+  for (const item of order.items) {
+    const itemId = item.externalUrl
+      ? seattleFabricsItemId(item.externalUrl)
+      : null
+    const html = item.externalUrl ? pages.get(item.externalUrl) : undefined
+    if (!itemId || !html) {
+      excluded.push(summarize(item))
+      continue
+    }
+
+    const options = seattleFabricsOptions(html, itemId)
+    let option = null
+    if (options.length > 0) {
+      const stored = item.variantId?.trim()
+      // The order stores the SKU; the option id is accepted too, since that is
+      // what the picker's `id` carries and a hand-typed value could be either.
+      option = options.find(o => o.sku === stored)
+        ?? options.find(o => o.optionId === stored)
+        ?? null
+      if (!option) {
+        excluded.push(summarize(item))
+        continue
+      }
+    }
+
+    addLinks.push({
+      id: item.id,
+      partName: item.partName,
+      quantity: item.quantity,
+      url: seattleFabricsAddUrl(host),
+      postFields: seattleFabricsAddFields(itemId, item.quantity, option),
+      enctype: SEATTLE_FABRICS_ENCTYPE
+    })
+    included.push(summarize(item))
+  }
+
+  if (addLinks.length === 0) return { ...empty, reason: 'no-variants' }
+
+  return {
+    url: null,
+    addLinks,
+    cartUrl: seattleFabricsCartUrl(host),
+    included,
+    excluded,
+    reason: 'ok'
+  }
+}
+
 export async function buildCartLink(
   order: OrderRecord,
   signal?: AbortSignal
@@ -554,6 +660,9 @@ export async function buildCartLink(
   }
   if (platform === 'playing-with-fusion') {
     return buildPlayingWithFusionCart(order, host, empty)
+  }
+  if (platform === 'seattle-fabrics') {
+    return buildSeattleFabricsCart(order, host, empty, signal)
   }
   if (platform === 'rock-west') {
     return buildRockWestCart(order, host, empty, signal)

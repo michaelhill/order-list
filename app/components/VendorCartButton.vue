@@ -209,11 +209,17 @@ async function openCart() {
               Some vendors (Playing With Fusion) only add on a POST, so those
               rows submit a form rather than following a link. Both target the
               same named window so the buyer stays in one tab.
+
+              `enctype` is set only where the vendor refuses the browser
+              default of application/x-www-form-urlencoded. Seattle Fabrics
+              does: sent urlencoded their add_cart.asp accepts the request and
+              adds nothing, so the row would tick off with an empty cart.
             -->
             <form
               v-if="link.postFields"
               :action="link.url"
               method="post"
+              :enctype="link.enctype"
               target="vendorcart"
               @submit="onAddSubmit(link.id)"
             >
