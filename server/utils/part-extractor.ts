@@ -117,6 +117,9 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   // vendor from the product's `brand`, which is the line it belongs to --
   // a mounting bracket arrived from "C-more Micro".
   { match: 'automationdirect.com', name: 'AutomationDirect' },
+  // Two words; the host fallback gives "Seattlefabrics". Their og:site_name
+  // happens to be right, but the microdata branch does not consult it.
+  { match: 'seattlefabrics.com', name: 'Seattle Fabrics' },
   // Two words, like Bolt Depot; the host fallback gives "Microcenter".
   { match: 'microcenter.com', name: 'Micro Center' },
   // Two words; the host fallback gives "Harborfreight".
@@ -571,6 +574,154 @@ function powerwerxFields(document: ParsedDoc): {
   }
 
   return { price, sku, variants }
+}
+
+// Seattle Fabrics runs Shift4Shop (3dcart), which publishes no JSON-LD at all
+// -- only schema.org *microdata*, as `<meta itemprop>` tags. The OpenGraph
+// fallback below already reads `meta[itemprop="price"]`, so price and image
+// come out fine without help. Two things do not, and both matter:
+//
+//   - `og:title` is their SEO title ("500 Denier CORDURA(R) Fabric for Sale |
+//     Seattle Fabrics"), not the product name. The <h1> carries the real one.
+//   - The options are the whole point of the vendor, and they live in a
+//     JavaScript block rather than in the markup.
+const SEATTLE_FABRICS_HOSTS = ['seattlefabrics.com']
+
+function isSeattleFabricsHost(hostname: string): boolean {
+  return SEATTLE_FABRICS_HOSTS.some(domain => hostMatches(hostname, domain))
+}
+
+// /{slug}_p_{id}.html is a product; /{slug}_c_{id}.html is a category.
+//
+// The id is authoritative and the slug is decoration, exactly as Online
+// Metals' /pid/ is: /utter-nonsense-slug_p_52.html still serves the CORDURA,
+// and a stale slug redirects to the current one -- a sitemap URL for product
+// 28 came back as "Sunbrella Hold" because that product had been renamed
+// since. So a link that has drifted still resolves, and what the page says
+// wins over what the URL claims.
+const SEATTLE_FABRICS_PRODUCT = /_p_\d+\.html$/i
+
+// Shift4Shop emits one parallel array per product id:
+//
+//   inventoryarray52[2] = '627#-9629';  idarray52[2] = 'FC5-RED';
+//   aopricearray52[2]   = '0';          gtinarray52[2] = '';
+//
+// The index ties them together and `inventoryarray` leads with the option id,
+// which is what the <option value> in the picker carries -- so the arrays are
+// how an option becomes a part number.
+//
+// `aopricearray` is *not* the price and must not be read as one: it is zero
+// for every option of every product in this catalogue, including the ones that
+// demonstrably cost more. The price lives in the hidden inputs below.
+//
+// The id suffix is the product's own, taken from the URL rather than matched
+// loosely, because a page carrying a related product would otherwise mix two
+// products' arrays together.
+function seattleFabricsSkus(
+  html: string,
+  productId: string
+): Map<string, string> {
+  const read = (name: string) => {
+    const out = new Map<string, string>()
+    const pattern = new RegExp(
+      `${name}${productId}\\[(\\d+)\\]\\s*=\\s*'([^']*)'`,
+      'g'
+    )
+    for (const match of html.matchAll(pattern)) out.set(match[1]!, match[2]!)
+    return out
+  }
+  const inventory = read('inventoryarray')
+  const skus = read('idarray')
+
+  const byOption = new Map<string, string>()
+  for (const [index, value] of inventory) {
+    const optionId = value.split('#')[0]?.trim()
+    const sku = skus.get(index)?.trim()
+    if (optionId && sku) byOption.set(optionId, sku)
+  }
+  return byOption
+}
+
+// What an option does to the price, out of the hidden inputs the store's own
+// `validateValues` reads:
+//
+//   <input type="hidden" name="price_7018"  value="3.00">   absolute
+//   <input type="hidden" name="pricep_7018" value="0">      percent
+//
+// Nothing else in the page carries this. The figures are *adjustments to the
+// base price*, not prices, which is why grepping the markup for the price a
+// buyer sees finds nothing: the $11.95 option is stored as 3.00 against an
+// $8.95 base. Applied in the same order the store applies them -- percentage
+// against the base, then the absolute -- so the arithmetic matches the page.
+//
+// This is what makes the picker honest. The CORDURA lists at $16.50 and its
+// Berry Compliant colours carry +2.00, which is exactly the "$16.50 - $18.50"
+// the product's own title advertises; without reading these, choosing Coyote
+// would record $16.50 for a fabric the store charges $18.50 for.
+function seattleFabricsPrice(
+  document: ParsedDoc,
+  optionId: string,
+  basePrice: number | null
+): number | null {
+  if (basePrice == null) return null
+  const valueOf = (name: string) => {
+    const el = document.querySelector(`input[name="${name}${optionId}"]`)
+    const raw = el?.getAttribute('value')?.trim()
+    if (!raw) return 0
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  const adjusted
+    = basePrice + (basePrice * valueOf('pricep_')) / 100 + valueOf('price_')
+  // A rounding guard: these are money, and 16.5 + 2 lands cleanly but a
+  // percentage will not always.
+  return Math.round(adjusted * 1e6) / 1e6
+}
+
+function seattleFabricsFields(
+  document: ParsedDoc,
+  html: string,
+  urlObj: URL,
+  basePrice: number | null
+): { title: string | null, sku: string | null, variants: ExtractedVariant[] } {
+  const title = cleanName(document.querySelector('h1')?.textContent)
+
+  const productId = /_p_(\d+)\.html/i.exec(urlObj.pathname)?.[1]
+  if (!productId) return { title, sku: null, variants: [] }
+  const skuByOption = seattleFabricsSkus(html, productId)
+
+  // Built from the <select>s, never from the arrays. The arrays hold every
+  // option the product has ever had -- the CORDURA carries 26 while offering
+  // 9, the rest being colours withdrawn from sale -- so listing them would
+  // offer a buyer parts the store will not sell. An option with no array
+  // entry is dropped for the mirror-image reason: it has no part number, and
+  // that is what both a placeholder ("Width") and a degenerate single-choice
+  // group ("Black/Black" beside the real picker on the neoprene) look like.
+  const variants: ExtractedVariant[] = []
+  const seen = new Set<string>()
+  for (const select of document.querySelectorAll('select')) {
+    if (!/^option-/.test(select.getAttribute('name') ?? '')) continue
+    for (const option of select.querySelectorAll('option')) {
+      const optionId = option.getAttribute('value')?.trim()
+      const sku = optionId ? skuByOption.get(optionId) : undefined
+      if (!optionId || !sku || seen.has(sku)) continue
+      seen.add(sku)
+      variants.push({
+        id: sku,
+        sku,
+        title: cleanText(option.textContent) ?? sku,
+        price: seattleFabricsPrice(document, optionId, basePrice)
+      })
+    }
+  }
+
+  // One option is not a choice, it is the part number restated -- the same
+  // rule the nested-offer reader uses. Hand it back as the product's SKU
+  // instead, which is the useful half.
+  if (variants.length === 1) {
+    return { title, sku: variants[0]!.sku, variants: [] }
+  }
+  return { title, sku: null, variants }
 }
 
 // BrickLink is a marketplace, not a storefront, and that shapes everything
@@ -1911,6 +2062,55 @@ export async function extractPart(
           vendorName: mappedVendor ?? titleCaseHost(hostname),
           source: 'amazon',
           product
+        }
+      }
+    }
+
+    // 2.6 Seattle Fabrics: microdata rather than JSON-LD, so the OpenGraph
+    // fallback below already reads their price and image correctly. What it
+    // cannot do is name the product -- og:title is the SEO title -- or find
+    // the options, which are in a script block.
+    if (isSeattleFabricsHost(hostname)) {
+      // Their URL grammar tells a product from a category outright --
+      // _p_{id}.html against _c_{id}.html -- and a category page carries an
+      // <h1> and no price, so without this check "500 D. CORDURA(R)" becomes a
+      // priceless line item with nothing orderable behind it. The same trap
+      // VEX's slug pages and WCP's configurator pages set.
+      if (!SEATTLE_FABRICS_PRODUCT.test(urlObj.pathname)) {
+        return { url, hostname, vendorName, source: 'none', product: null }
+      }
+      const basePrice = parsePrice(
+        getMeta(document, ['meta[itemprop="price"]', '[itemprop="price"]'])
+      )
+      const fields = seattleFabricsFields(document, html, urlObj, basePrice)
+      const ogTitle = getMeta(document, [
+        'meta[property="og:title"]',
+        'meta[name="title"]',
+        'h1'
+      ])
+      const title = fields.title ?? ogTitle
+      if (title) {
+        return {
+          url,
+          hostname,
+          vendorName: mappedVendor ?? ogVendor() ?? titleCaseHost(hostname),
+          source: 'html',
+          product: {
+            title,
+            description: ogDescription(),
+            price: basePrice,
+            currency: getMeta(document, [
+              'meta[itemprop="priceCurrency"]'
+            ]) ?? 'USD',
+            sku: fields.sku,
+            image: absoluteUrl(
+              getMeta(document, ['meta[property="og:image"]']),
+              urlObj
+            ),
+            variantId: null,
+            variantTitle: null,
+            variants: fields.variants
+          }
         }
       }
     }

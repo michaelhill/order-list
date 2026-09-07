@@ -76,7 +76,8 @@ const BROWSER_RENDER_HOSTS: Array<{
   { domain: 'studica.com' },
   { domain: 'vexrobotics.com', blockScripts: true },
   { domain: 'bricklink.com', waitFor: '.item.table-row' },
-  { domain: 'onlinemetals.com', blockScripts: true }
+  { domain: 'onlinemetals.com', blockScripts: true },
+  { domain: 'seattlefabrics.com', blockScripts: true }
 ]
 
 export function shouldRenderInBrowser(hostname: string): boolean {
