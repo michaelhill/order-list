@@ -259,10 +259,15 @@ async function handleInviteMember(event: FormSubmitEvent<InviteMemberForm>) {
         trailing-icon="i-lucide-chevron-down"
         :loading="isLoadingOrganizations"
       >
-        <span v-if="activeOrganization">
+        <!-- The name is the widest thing in the header and the icon already
+             says what the control is, so below lg only the icon and chevron
+             show. "Innovators Robotics" plus the avatar, theme toggle and menu
+             button overflowed a 390px phone by 205px. lg matches where the
+             header stops showing its menu button. -->
+        <span v-if="activeOrganization" class="hidden lg:inline">
           {{ activeOrganization.name }}
         </span>
-        <span v-else> Select organization </span>
+        <span v-else class="hidden lg:inline"> Select organization </span>
       </UButton>
     </UDropdownMenu>
 

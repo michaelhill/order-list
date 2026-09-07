@@ -132,7 +132,11 @@ function openPriceHistory(item: SearchResultItem) {
 
 <template>
   <div>
+    <!-- The default hero puts 96px of padding above and below its text,
+         which on a 390px phone pushes the first filter 416px down -- half
+         the screen spent before anything usable. Full size from sm up. -->
     <UPageHero
+      :ui="{ container: 'py-10 sm:py-32' }"
       title="Search Parts"
       description="Find parts and products across all vendors"
     />
