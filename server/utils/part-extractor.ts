@@ -1596,6 +1596,52 @@ function fromMicroCenterUrl(urlObj: URL): ExtractedProduct | null {
   }
 }
 
+// Seattle Fabrics' pages are readable in a headed browser -- but only from an
+// address Cloudflare trusts, and the droplet is not one. Measured on the
+// production box: their challenge holds for 60 seconds without the page even
+// changing size, so it is a flat refusal rather than a slow solve and no
+// timeout will get past it. The same box renders VEX and Powerwerx, both also
+// behind Cloudflare, without trouble, so this is their configuration meeting a
+// DigitalOcean IP rather than anything wrong here.
+//
+// So the URL is what production actually has to work from. It is a plain
+// de-slug and deliberately nothing cleverer: their titles carry the price with
+// the decimal point dropped ("...-1650--1850-linear-yard" is
+// "@ $16.50 - $18.50/ linear yard"), and picking those digits back out means
+// telling a price from a denier, a width or a model number -- 500 D, 60", HH-66
+// and GP127 all sit in the same slugs. Guessing wrong renames the part after a
+// number it does not have, which is the trap Micro Center's "30.6 GBps" set.
+//
+// No SKU: the _p_ id is their internal catalogue id, used as `item_id` by the
+// cart, not a part number printed anywhere a buyer would recognise. Their real
+// part numbers (FC5-RED) are per-option and only on the page.
+const SEATTLE_FABRICS_SLUG = /^\/(.+)_p_(\d+)\.html$/i
+
+function fromSeattleFabricsUrl(urlObj: URL): ExtractedProduct | null {
+  // Percent-encoded, because their slugs carry the registered-trademark sign.
+  let pathname = urlObj.pathname
+  try {
+    pathname = decodeURIComponent(pathname)
+  } catch {
+    // A malformed escape leaves the raw path, which still parses.
+  }
+  const match = SEATTLE_FABRICS_SLUG.exec(pathname)
+  if (!match) return null
+  const title = match[1]!.split('-').filter(Boolean).join(' ').trim()
+  if (!title) return null
+
+  return {
+    title,
+    description: null,
+    price: null,
+    currency: 'USD',
+    sku: null,
+    variantId: null,
+    variantTitle: null,
+    variants: []
+  }
+}
+
 const URL_ONLY_VENDORS: Array<{
   domain: string
   parse: (urlObj: URL) => ExtractedProduct | null
@@ -1617,7 +1663,15 @@ const URL_ONLY_VENDORS: Array<{
   // No FRC_VENDORS entry needed: the host fallback already yields "Menards".
   { domain: 'menards.com', parse: fromMenardsUrl },
   { domain: 'harborfreight.com', parse: fromHarborFreightUrl },
-  { domain: 'microcenter.com', parse: fromMicroCenterUrl }
+  { domain: 'microcenter.com', parse: fromMicroCenterUrl },
+  // gatesProducts because their grammar genuinely separates the two:
+  // _p_{id}.html is a product and _c_{id}.html a category, so a category link
+  // is "not a product" rather than merely one this parser cannot read.
+  {
+    domain: 'seattlefabrics.com',
+    parse: fromSeattleFabricsUrl,
+    gatesProducts: true
+  }
 ]
 
 // ---- Amazon --------------------------------------------------------------
