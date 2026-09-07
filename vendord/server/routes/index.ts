@@ -11,6 +11,7 @@ import {
   getBigCommerceToken,
   type BigCommerceProduct,
 } from "../utils/bigcommerce";
+import { fetchSwyftProduct } from "../utils/swyft";
 
 const querySchema = z.object({
   url: z.string().trim().min(1, "URL is required").url("Enter a valid URL"),
@@ -463,6 +464,35 @@ export default eventHandler(async (event) => {
 
     return {
       ...result,
+      variantId,
+    };
+  }
+  // Swyft runs a headless Shopify storefront on Next.js, so none of the
+  // endpoints the shopify branch needs are served -- the product lives in the
+  // page's RSC flight payload instead. Without this branch a Swyft URL fell
+  // through to "Unsupported vendor type" and only resolved when the nightly
+  // scrape happened to have cached it already, which is why a product added
+  // today looked like it had no variants at all.
+  if (vendor.type == "swyft") {
+    const unified = await fetchSwyftProduct(vendor.hostname, urlObj.pathname);
+    if (!unified) {
+      throw createError({
+        statusCode: 404,
+        statusMessage: "Product not found on vendor site",
+      });
+    }
+
+    // Deliberately not written to productCache, unlike the branches around
+    // it. Their ids come from a canonical handle; this one would come from
+    // the pasted path, and Swyft's leading section is decorative -- every
+    // prefix resolves to the same product, so /structure/swyft-bearing-plates
+    // and /motion/swyft-bearing-plates would land as two rows for one part.
+    // That is two search documents and two price histories that each tell
+    // half the story. The nightly scrape walks the sitemap, knows which
+    // section is canonical, and owns this row; a paste only needs the answer.
+    return {
+      vendor,
+      productData: { product: unified },
       variantId,
     };
   }

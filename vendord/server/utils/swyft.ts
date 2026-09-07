@@ -173,6 +173,32 @@ function toUnified(
 }
 
 /**
+ * One product, read from its own page.
+ *
+ * The nightly scrape walks the whole sitemap, but a buyer pasting a link
+ * wants an answer now and may well be pasting a product added since the last
+ * run -- so this fetches the single page and reads the product out of the
+ * flight payload the same way. A page carries every product it links to, so
+ * the match is by slug rather than by taking whatever came back first.
+ */
+export async function fetchSwyftProduct(
+  hostname: string,
+  pathname: string
+): Promise<UnifiedProduct | null> {
+  const res = await fetch(`https://${hostname}${pathname}`, {
+    headers: { 'User-Agent': USER_AGENT }
+  })
+  if (!res.ok) return null
+
+  const products = parseSwyftProducts(await res.text())
+  const slug = pathname.split('/').filter(Boolean).pop()
+  if (!slug) return null
+
+  const product = products.get(slug)
+  return product ? toUnified(product, pathname) : null
+}
+
+/**
  * Every product Swyft's storefront links to. Walks the sitemap's product
  * pages and collects the product objects each one embeds.
  */
