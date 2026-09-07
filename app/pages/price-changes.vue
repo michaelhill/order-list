@@ -189,7 +189,11 @@ function openPriceHistory(change: PriceChange) {
 
 <template>
   <div>
+    <!-- The default hero puts 96px of padding above and below its text,
+         which on a 390px phone pushes the first filter 416px down -- half
+         the screen spent before anything usable. Full size from sm up. -->
     <UPageHero
+      :ui="{ container: 'py-10 sm:py-32' }"
       title="Price Changes"
       description="Every price move recorded across the tracked vendor catalogue"
     />

@@ -6,6 +6,7 @@
       size="sm"
       color="primary"
       variant="solid"
+      class="whitespace-nowrap"
     >
       Log in
     </UButton>

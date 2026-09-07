@@ -70,7 +70,7 @@
           <div
             v-for="column in boardColumns"
             :key="column.key"
-            class="flex flex-col"
+            class="flex min-w-0 flex-col"
           >
             <div class="mb-3 flex items-center justify-between gap-3">
               <div>
@@ -87,7 +87,7 @@
             </div>
 
             <div
-              class="flex-1 space-y-3 rounded-xl border border-dashed border-gray-300/60 bg-white/80 p-3 transition-all dark:bg-gray-950/60"
+              class="min-w-0 flex-1 space-y-3 rounded-xl border border-dashed border-gray-300/60 bg-white/80 p-3 transition-all dark:bg-gray-950/60"
               :class="[
                 dropTarget === column.key
                   ? 'ring-2 ring-primary-500 ring-offset-2 ring-offset-transparent'
