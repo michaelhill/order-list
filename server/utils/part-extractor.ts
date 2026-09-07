@@ -117,6 +117,8 @@ const FRC_VENDORS: Array<{ match: string, name: string }> = [
   // vendor from the product's `brand`, which is the line it belongs to --
   // a mounting bracket arrived from "C-more Micro".
   { match: 'automationdirect.com', name: 'AutomationDirect' },
+  // Two words, like Bolt Depot; the host fallback gives "Microcenter".
+  { match: 'microcenter.com', name: 'Micro Center' },
   // Two words; the host fallback gives "Harborfreight".
   { match: 'harborfreight.com', name: 'Harbor Freight' },
   // Their own styling carries the article; the host fallback gives "Homedepot".
@@ -1231,10 +1233,18 @@ const TITLE_MINOR_WORDS = new Set([
 // door"). Lowe's and Home Depot keep the real casing in theirs -- "DEWALT",
 // "KILZ", "RUBI" -- so they must not be put through this, which would render
 // those as "Dewalt", "Kilz" and "Rubi".
-function capitalizeTitle(title: string): string {
+function capitalizeTitle(
+  title: string,
+  terms?: Map<string, string>
+): string {
   return title
     .split(' ')
     .map((word, index) => {
+      // A caller-supplied display form wins outright: it is the only thing
+      // that can produce the mixed case an acronym actually carries, which no
+      // capitalisation rule would arrive at ("PCIe", not "Pcie" or "PCIE").
+      const term = terms?.get(word.toLowerCase())
+      if (term) return term
       // Anything starting with a digit is a measurement. Its own capitals are
       // the dimension letters written straight onto the number -- 69-1/4w x
       // 80h, which the store renders 69-1/4"W x 80"H. A letter run only counts
@@ -1442,6 +1452,86 @@ function fromHarborFreightUrl(urlObj: URL): ExtractedProduct | null {
   }
 }
 
+// Micro Center sits behind a Cloudflare managed challenge, and unlike Studica's
+// and VEX's a headed browser does not reliably clear it. Measured: one render
+// in five got through, after 28 seconds, and the rest sat on the interstitial
+// for the whole window -- after which the store stopped issuing a clearance
+// cookie to that address at all, on a fresh context and a second product. That
+// is worse than useless here. Every paste would hang for the full browser
+// budget and then fall back to exactly what this parser returns anyway, while
+// each attempt spends the standing of whatever address makes it -- and in
+// production that is a datacentre IP, which Cloudflare treats more harshly
+// than the residential one these numbers came from. Their robots.txt is behind
+// the same wall, so their crawl policy cannot be read either.
+//
+// So they are matched before any network call and their site is never
+// requested. That is the whole point of the entry, not a consolation prize.
+//
+// /product/{itemNumber}/{slug}. The item number is Micro Center's own -- what
+// is on the shelf tag and what their search takes -- and their slugs are
+// unusually descriptive, so the pair rebuilds a good line item. /support/{id}/
+// pages share the shape but not the first segment, so they do not match.
+const MICRO_CENTER_PRODUCT = /^\/product\/(\d+)\/([^/]+)\/?$/i
+
+// Their catalogue is written in acronyms, and a de-slugged title capitalises
+// them as ordinary words -- "Ssd", "Nvme", "Pcie" -- which reads as a typo on
+// every line item. An explicit table rather than a rule about short tokens, so
+// it can only reach words that are always acronyms in a parts catalogue and
+// never a size. It carries the mixed-case forms for the same reason: no
+// uppercasing rule gets "PCIe" or "GBps" right.
+//
+// Deliberately absent: "m2". Micro Center writes M.2 for the drive form
+// factor, but an M2 screw is a real thing a team buys, and "M2" is right for
+// both readings where "M.2" is right for only one.
+const MICRO_CENTER_TERMS = new Map([
+  ['ssd', 'SSD'], ['hdd', 'HDD'], ['nvme', 'NVMe'], ['pcie', 'PCIe'],
+  ['pci', 'PCI'], ['sata', 'SATA'], ['usb', 'USB'], ['hdmi', 'HDMI'],
+  ['vga', 'VGA'], ['dvi', 'DVI'], ['rgb', 'RGB'], ['led', 'LED'],
+  ['lcd', 'LCD'], ['oled', 'OLED'], ['cpu', 'CPU'], ['gpu', 'GPU'],
+  ['ram', 'RAM'], ['ddr', 'DDR'], ['ddr3', 'DDR3'], ['ddr4', 'DDR4'],
+  ['ddr5', 'DDR5'], ['atx', 'ATX'], ['itx', 'ITX'], ['psu', 'PSU'],
+  ['nas', 'NAS'], ['poe', 'PoE'], ['lan', 'LAN'], ['qlc', 'QLC'],
+  ['tlc', 'TLC'], ['mlc', 'MLC'], ['slc', 'SLC'], ['nand', 'NAND'],
+  ['emmc', 'eMMC'], ['sdxc', 'SDXC'], ['sdhc', 'SDHC'], ['awg', 'AWG'],
+  ['pwm', 'PWM'], ['gpio', 'GPIO'], ['uart', 'UART'], ['kvm', 'KVM'],
+  ['ups', 'UPS'], ['oem', 'OEM'], ['mhz', 'MHz'], ['ghz', 'GHz'],
+  ['rpm', 'RPM'], ['wifi', 'WiFi'], ['gbps', 'GBps'], ['mbps', 'MBps'],
+  ['tb', 'TB'], ['gb', 'GB'], ['mb', 'MB'],
+  // PCIe lane widths are written lowercase, and the generic rule would
+  // capitalise them: "Gen 4 X4" for "Gen 4 x4". A bounded set -- there
+  // are only these five -- and no collision with a dimension like
+  // "10x14", which carries digits on both sides of the x.
+  ['x1', 'x1'], ['x2', 'x2'], ['x4', 'x4'], ['x8', 'x8'], ['x16', 'x16']
+])
+
+function fromMicroCenterUrl(urlObj: URL): ExtractedProduct | null {
+  const match = MICRO_CENTER_PRODUCT.exec(urlObj.pathname)
+  if (!match) return null
+
+  // Deliberately *not* titleFromHardwareSlug. That rebuilder exists for stores
+  // which hyphenate a decimal -- Menards writes 1-1-2-in for an inch and a
+  // half -- whereas Micro Center simply drops the point, so "SATA 3.0 6 GBps"
+  // arrives as "sata-30-6-gbps". Run through it, the 30 pairs with the 6 and
+  // the title claims "30.6 GBps", a figure the product does not have.
+  // Inventing a number is worse than leaving the URL's own spacing alone.
+  const title = capitalizeTitle(
+    match[2]!.split('-').filter(Boolean).join(' '),
+    MICRO_CENTER_TERMS
+  ).trim()
+  if (!title) return null
+
+  return {
+    title,
+    description: null,
+    price: null,
+    currency: 'USD',
+    sku: match[1]!,
+    variantId: null,
+    variantTitle: null,
+    variants: []
+  }
+}
+
 const URL_ONLY_VENDORS: Array<{
   domain: string
   parse: (urlObj: URL) => ExtractedProduct | null
@@ -1462,7 +1552,8 @@ const URL_ONLY_VENDORS: Array<{
   { domain: 'homedepot.com', parse: fromHomeDepotUrl },
   // No FRC_VENDORS entry needed: the host fallback already yields "Menards".
   { domain: 'menards.com', parse: fromMenardsUrl },
-  { domain: 'harborfreight.com', parse: fromHarborFreightUrl }
+  { domain: 'harborfreight.com', parse: fromHarborFreightUrl },
+  { domain: 'microcenter.com', parse: fromMicroCenterUrl }
 ]
 
 // ---- Amazon --------------------------------------------------------------
