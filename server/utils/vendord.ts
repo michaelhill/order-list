@@ -19,12 +19,17 @@ const VENDORD_ORIGIN = process.env.VENDORD_URL
 // Vendors that sit behind a bot challenge, so a direct fetch from the Worker
 // only ever returns an interstitial. These go to vendord first instead of
 // wasting a round trip on a request we know will be refused.
-// Nothing is delegated as a *fetch* any more: Online Metals used to be here,
-// and is now rendered in a browser instead, which returns the page's own
-// JSON-LD -- name, sku, description, image and a price per cut length -- where
-// the scraper hop produced nothing usable. Kept because the mechanism is
-// sound and the next unreadable vendor may suit it.
-const DELEGATED_HOSTS: string[] = []
+// Online Metals used to be here and is browser-rendered now, which reads its
+// page properly where the scraper hop did not.
+//
+// Swyft is the case this mechanism was kept for. Their storefront is headless
+// Shopify on Next.js: the product lives in an RSC flight payload, which the
+// extractor cannot read and vendord's swyft.ts can. Left to itself the
+// extractor got as far as OpenGraph -- a title, no price, no variants -- and
+// because that *is* a product, the slideover applied it and returned without
+// ever consulting the scraper. A part arrived named, priced blank, with no
+// variant picker and no warning that anything had been missed.
+const DELEGATED_HOSTS: string[] = ['swyftrobotics.com']
 
 export function shouldDelegateToScraper(hostname: string): boolean {
   return DELEGATED_HOSTS.some(domain => hostMatches(hostname, domain))
