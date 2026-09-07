@@ -36,6 +36,14 @@ useSeoMeta({
         >
           <span class="hidden md:block">Search Parts</span>
         </UButton>
+        <UButton
+          to="/price-changes"
+          icon="i-lucide-trending-down"
+          variant="ghost"
+          color="neutral"
+        >
+          <span class="hidden md:block">Price Changes</span>
+        </UButton>
       </template>
 
       <template #right>
