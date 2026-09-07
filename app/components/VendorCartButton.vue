@@ -211,9 +211,9 @@ async function openCart() {
               same named window so the buyer stays in one tab.
 
               `enctype` is set only where the vendor refuses the browser
-              default of application/x-www-form-urlencoded. Seattle Fabrics
-              does: sent urlencoded their add_cart.asp accepts the request and
-              adds nothing, so the row would tick off with an empty cart.
+              default of application/x-www-form-urlencoded. No vendor sets it
+              today, and Vue drops an attribute bound to undefined, so these
+              rows post exactly as they did before.
             -->
             <form
               v-if="link.postFields"

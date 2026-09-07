@@ -76,9 +76,28 @@ const BROWSER_RENDER_HOSTS: Array<{
   { domain: 'studica.com' },
   { domain: 'vexrobotics.com', blockScripts: true },
   { domain: 'bricklink.com', waitFor: '.item.table-row' },
-  { domain: 'onlinemetals.com', blockScripts: true },
-  { domain: 'seattlefabrics.com', blockScripts: true }
+  { domain: 'onlinemetals.com', blockScripts: true }
 ]
+
+// Seattle Fabrics is deliberately NOT in that list, and the reason is worth
+// keeping because their pages read perfectly in a browser -- from the right
+// address. Cloudflare serves them to a residential IP on the first navigation
+// every time, and refuses the droplet outright: measured on the production
+// box, the challenge holds for a full 60 seconds without the page even
+// changing size. That is a flat refusal, not a slow solve, so no timeout gets
+// past it. The same box renders VEX and Powerwerx, both also behind
+// Cloudflare, without trouble.
+//
+// Listing them anyway would cost every production lookup ~17s of waiting
+// (8s challenge poll, then the retry with scripts allowed) before falling back
+// to exactly what the URL parser returns instantly. Worse, it made dev and
+// production disagree -- which is how this shipped: the whole vendor was
+// validated over a home connection and never once from the droplet.
+//
+// To re-enable if that address is ever allowlisted, add
+// `{ domain: 'seattlefabrics.com', blockScripts: true }` above and restore the
+// 'seattle-fabrics' branch in cart-link.ts. Everything that reads their
+// options is still there in server/utils/seattle-fabrics.ts.
 
 export function shouldRenderInBrowser(hostname: string): boolean {
   return BROWSER_RENDER_HOSTS.some(v => hostMatches(hostname, v.domain))

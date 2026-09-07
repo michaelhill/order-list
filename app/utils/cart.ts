@@ -49,7 +49,7 @@ const SHOPIFY_PRODUCT_PATH = /\/products\/(?=[^/?#]*[a-z])[^/?#]+\/?$/i
 // a single cart link. Mirrors BIGCOMMERCE_HOSTS and PLAYING_WITH_FUSION_HOSTS
 // on the server.
 const PER_ITEM_HOSTS
-  = /(^|\.)(revrobotics|banebots|playingwithfusion|rockwestcomposites|seattlefabrics)\.com$/i
+  = /(^|\.)(revrobotics|banebots|playingwithfusion|rockwestcomposites)\.com$/i
 
 export function isPerItemCartVendor(order: Order): boolean {
   if (order.vendorType === 'bigcommerce') return true
