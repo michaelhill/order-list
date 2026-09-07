@@ -234,6 +234,18 @@ Every route calls `assertOrderInOrg()` first — a receipt id alone must never b
 
   **Reading it back**: `GET /api/vendors/price-history?id=<search doc id>` (auth-gated no more than `search`/`facets` beside it, being the same public catalogue). It takes the base64 document id the search index uses, or the raw `productCache` key. `app/components/PriceHistoryChart.vue` draws the step plot as inline SVG — a dozen line segments per product does not justify a charting dependency, and none of them steps correctly without configuration anyway. Its one rule: every segment is horizontal or vertical, never diagonal. `PriceHistoryModal.vue` wraps it, and the search page opens it from the price on each result card.
 
+  **The whole catalogue's movement is at `/price-changes`**, served by `GET /api/vendors/price-changes` — a table of every recorded move, defaulting to the last 30 days, with date, vendor and text filters. Public, like `search`/`facets`/`price-history` beside it.
+
+  Three things about that endpoint are the design.
+
+  - **A change is a history row with an earlier row behind it**, so the *first* row for a product is excluded. That row is the price the tracker opened at, not a move; counting it would put every product on the page the day it entered the catalogue, reporting a change from nothing.
+  - **The `lag()` window runs over the whole table, and the date filter is applied after it.** Because storage is change-only, the row a change is measured against is usually *outside* the window being asked for — the previous price could be from months ago. Filtering first and lagging second would silently compare each change to the previous change *in the window*, misreporting the first one in every range. Verified against SQL: a change on 2026-09-02 inside an eight-day window correctly reported the 08-20 price as its predecessor, not the 60-day-old baseline.
+  - **Vendor facet counts are taken before the vendor filter is applied**, so picking one vendor does not collapse the menu to that single option.
+
+  Two smaller notes. The `previous_micros` column is a bare `lag()` with no drizzle type mapper behind it, so pg hands that bigint back as a *string* where the mapped column beside it is a number — it is coerced explicitly. And `ROW_CAP` bounds what one request pulls into memory; hitting it is reported as `truncated` and surfaced as a banner, rather than quietly showing a partial answer.
+
+  **The page's default date range is computed in UTC, deliberately, not in the viewer's local day.** The page is server-rendered, so that default is computed twice — once on the droplet, once in the browser — and a local-day default disagrees whenever the two are not on the same calendar date. That is not cosmetic: the SSR pass fetches one range, the client hydrates with another and immediately refetches, so a page load costs two of these queries on a one-core box and the dates visibly jump. UTC is also the right anchor rather than merely a consistent one, since the droplet runs on it and the server reads these dates as its own local midnight against timestamps vendord writes at the same offset.
+
   **The `vendors` table is the input, and it does not seed itself** — an empty table means an empty index, with both tasks reporting success. Sixteen FRC vendors are reachable, and which platform a brand runs is not guessable. Several of the smaller ones sit on a `shop.`/`store.` subdomain rather than the apex, and the apex does not always redirect to it, so the hostname in the table is the one that actually serves `/products.json`:
 
   | vendor | `type` | hostname |
@@ -414,7 +426,7 @@ Platform detection is the fiddly part. An order with no vendor row is identified
 
 **Dashboard interactions** — `/app` offers a board view and a table view. The board has three drag targets: dropping an order on a **column** changes its status, dropping a part on another **order card** moves it there (same vendor, both `to_order`), and dropping a part on the **To order column** splits it into its own order. The table view filters by date range, vendor, status and tag, and exports CSV.
 
-**Routing & rendering** — landing `/` is prerendered (`routeRules`). The authenticated dashboard is `/app` (alongside `/search`, `/settings`, `/organization`), gated by `app/middleware/app.global.ts` (redirects unauthenticated users to `/auth/login`, and enforces admin/owner role for `/organization`). Marketing/docs use Nuxt Content: markdown in `content/`, config in `content.config.ts`, served at `/docs`. Layouts: `default` (marketing), `app`, `auth`, `docs`.
+**Routing & rendering** — landing `/` is prerendered (`routeRules`). The authenticated dashboard is `/app` (alongside `/settings` and `/organization`; `/search` and `/price-changes` are public, serving the same catalogue the unauthenticated search API does), gated by `app/middleware/app.global.ts` (redirects unauthenticated users to `/auth/login`, and enforces admin/owner role for `/organization`). Marketing/docs use Nuxt Content: markdown in `content/`, config in `content.config.ts`, served at `/docs`. Layouts: `default` (marketing), `app`, `auth`, `docs`.
 
 **Email/notifications** — Resend + Vue Email templates (`server/utils/*.vue`, rendered with `@vue-email/render`). Per-user, per-org preferences and an audit log live in `notificationPreferences` / `notificationLog`; helpers in `notification-helpers.ts` and `email-service.ts`. Route handlers fire notifications and forget them (`.catch(console.error)`), so a mail failure never fails the write.
 
