@@ -3,6 +3,11 @@ import parse, { splitCookiesString } from './set-cookie-parser'
 import type { DpoOptionGroup } from './wcp-dpo'
 import { fetchSailriteVariants, isSailriteHost } from './sailrite'
 import { ROCK_WEST_HOSTS } from './rock-west'
+import {
+  SEATTLE_FABRICS_HOSTS,
+  seattleFabricsOptions,
+  seattleFabricsPrice
+} from './seattle-fabrics'
 
 // Self-contained product extractor: given a product URL, reach out to the site
 // and pull structured details. Tries, in order:
@@ -585,7 +590,10 @@ function powerwerxFields(document: ParsedDoc): {
 //     Seattle Fabrics"), not the product name. The <h1> carries the real one.
 //   - The options are the whole point of the vendor, and they live in a
 //     JavaScript block rather than in the markup.
-const SEATTLE_FABRICS_HOSTS = ['seattlefabrics.com']
+//
+// The option reading itself lives in server/utils/seattle-fabrics.ts, shared
+// with the cart handoff so the picker and the add cannot disagree about what
+// a colour is called or what it costs.
 
 function isSeattleFabricsHost(hostname: string): boolean {
   return SEATTLE_FABRICS_HOSTS.some(domain => hostMatches(hostname, domain))
@@ -599,121 +607,26 @@ function isSeattleFabricsHost(hostname: string): boolean {
 // 28 came back as "Sunbrella Hold" because that product had been renamed
 // since. So a link that has drifted still resolves, and what the page says
 // wins over what the URL claims.
-const SEATTLE_FABRICS_PRODUCT = /_p_\d+\.html$/i
-
-// Shift4Shop emits one parallel array per product id:
-//
-//   inventoryarray52[2] = '627#-9629';  idarray52[2] = 'FC5-RED';
-//   aopricearray52[2]   = '0';          gtinarray52[2] = '';
-//
-// The index ties them together and `inventoryarray` leads with the option id,
-// which is what the <option value> in the picker carries -- so the arrays are
-// how an option becomes a part number.
-//
-// `aopricearray` is *not* the price and must not be read as one: it is zero
-// for every option of every product in this catalogue, including the ones that
-// demonstrably cost more. The price lives in the hidden inputs below.
-//
-// The id suffix is the product's own, taken from the URL rather than matched
-// loosely, because a page carrying a related product would otherwise mix two
-// products' arrays together.
-function seattleFabricsSkus(
-  html: string,
-  productId: string
-): Map<string, string> {
-  const read = (name: string) => {
-    const out = new Map<string, string>()
-    const pattern = new RegExp(
-      `${name}${productId}\\[(\\d+)\\]\\s*=\\s*'([^']*)'`,
-      'g'
-    )
-    for (const match of html.matchAll(pattern)) out.set(match[1]!, match[2]!)
-    return out
-  }
-  const inventory = read('inventoryarray')
-  const skus = read('idarray')
-
-  const byOption = new Map<string, string>()
-  for (const [index, value] of inventory) {
-    const optionId = value.split('#')[0]?.trim()
-    const sku = skus.get(index)?.trim()
-    if (optionId && sku) byOption.set(optionId, sku)
-  }
-  return byOption
-}
-
-// What an option does to the price, out of the hidden inputs the store's own
-// `validateValues` reads:
-//
-//   <input type="hidden" name="price_7018"  value="3.00">   absolute
-//   <input type="hidden" name="pricep_7018" value="0">      percent
-//
-// Nothing else in the page carries this. The figures are *adjustments to the
-// base price*, not prices, which is why grepping the markup for the price a
-// buyer sees finds nothing: the $11.95 option is stored as 3.00 against an
-// $8.95 base. Applied in the same order the store applies them -- percentage
-// against the base, then the absolute -- so the arithmetic matches the page.
-//
-// This is what makes the picker honest. The CORDURA lists at $16.50 and its
-// Berry Compliant colours carry +2.00, which is exactly the "$16.50 - $18.50"
-// the product's own title advertises; without reading these, choosing Coyote
-// would record $16.50 for a fabric the store charges $18.50 for.
-function seattleFabricsPrice(
-  document: ParsedDoc,
-  optionId: string,
-  basePrice: number | null
-): number | null {
-  if (basePrice == null) return null
-  const valueOf = (name: string) => {
-    const el = document.querySelector(`input[name="${name}${optionId}"]`)
-    const raw = el?.getAttribute('value')?.trim()
-    if (!raw) return 0
-    const parsed = Number(raw)
-    return Number.isFinite(parsed) ? parsed : 0
-  }
-  const adjusted
-    = basePrice + (basePrice * valueOf('pricep_')) / 100 + valueOf('price_')
-  // A rounding guard: these are money, and 16.5 + 2 lands cleanly but a
-  // percentage will not always.
-  return Math.round(adjusted * 1e6) / 1e6
-}
+const SEATTLE_FABRICS_PRODUCT = /_p_(\d+)\.html$/i
 
 function seattleFabricsFields(
   document: ParsedDoc,
   html: string,
-  urlObj: URL,
+  productId: string,
   basePrice: number | null
 ): { title: string | null, sku: string | null, variants: ExtractedVariant[] } {
   const title = cleanName(document.querySelector('h1')?.textContent)
 
-  const productId = /_p_(\d+)\.html/i.exec(urlObj.pathname)?.[1]
-  if (!productId) return { title, sku: null, variants: [] }
-  const skuByOption = seattleFabricsSkus(html, productId)
-
-  // Built from the <select>s, never from the arrays. The arrays hold every
-  // option the product has ever had -- the CORDURA carries 26 while offering
-  // 9, the rest being colours withdrawn from sale -- so listing them would
-  // offer a buyer parts the store will not sell. An option with no array
-  // entry is dropped for the mirror-image reason: it has no part number, and
-  // that is what both a placeholder ("Width") and a degenerate single-choice
-  // group ("Black/Black" beside the real picker on the neoprene) look like.
-  const variants: ExtractedVariant[] = []
-  const seen = new Set<string>()
-  for (const select of document.querySelectorAll('select')) {
-    if (!/^option-/.test(select.getAttribute('name') ?? '')) continue
-    for (const option of select.querySelectorAll('option')) {
-      const optionId = option.getAttribute('value')?.trim()
-      const sku = optionId ? skuByOption.get(optionId) : undefined
-      if (!optionId || !sku || seen.has(sku)) continue
-      seen.add(sku)
-      variants.push({
-        id: sku,
-        sku,
-        title: cleanText(option.textContent) ?? sku,
-        price: seattleFabricsPrice(document, optionId, basePrice)
-      })
-    }
-  }
+  const variants: ExtractedVariant[] = seattleFabricsOptions(html, productId)
+    .map(option => ({
+      // The option id, which is what the cart handoff has to post. The
+      // slideover stores `sku ?? id`, so the order still carries the part
+      // number and this costs nothing.
+      id: option.optionId,
+      sku: option.sku,
+      title: cleanText(option.label) ?? option.sku,
+      price: seattleFabricsPrice(basePrice, option)
+    }))
 
   // One option is not a choice, it is the part number restated -- the same
   // rule the nested-offer reader uses. Hand it back as the product's SKU
@@ -2076,13 +1989,16 @@ export async function extractPart(
       // <h1> and no price, so without this check "500 D. CORDURA(R)" becomes a
       // priceless line item with nothing orderable behind it. The same trap
       // VEX's slug pages and WCP's configurator pages set.
-      if (!SEATTLE_FABRICS_PRODUCT.test(urlObj.pathname)) {
+      const productId = SEATTLE_FABRICS_PRODUCT.exec(urlObj.pathname)?.[1]
+      if (!productId) {
         return { url, hostname, vendorName, source: 'none', product: null }
       }
       const basePrice = parsePrice(
         getMeta(document, ['meta[itemprop="price"]', '[itemprop="price"]'])
       )
-      const fields = seattleFabricsFields(document, html, urlObj, basePrice)
+      const fields = seattleFabricsFields(
+        document, html, productId, basePrice
+      )
       const ogTitle = getMeta(document, [
         'meta[property="og:title"]',
         'meta[name="title"]',
